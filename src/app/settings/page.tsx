@@ -21,6 +21,8 @@ export default function SettingsPage() {
   const [retentionError, setRetentionError] = useState<string | null>(null);
   const [leechThreshold, setLeechThreshold] = useState('8');
   const [leechError, setLeechError] = useState<string | null>(null);
+  const [siblingBuryMin, setSiblingBuryMin] = useState('5');
+  const [siblingBuryError, setSiblingBuryError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
@@ -34,12 +36,14 @@ export default function SettingsPage() {
       const m = await getSetting('claude_model');
       const r = await getSetting('default_retention');
       const lt = await getSetting('leech_threshold');
+      const sbm = await getSetting('sibling_bury_minutes');
       const tm = await getJsonSetting<boolean>('study_type_mode', false);
       const cm = await getJsonSetting<boolean>('study_confidence_mode', false);
       if (k) { setKeyDraft(k); setKeyStored(true); }
       if (m) setModel(m);
       if (r) setRetention(r);
       if (lt) setLeechThreshold(lt);
+      if (sbm) setSiblingBuryMin(sbm);
       setTypeMode(tm);
       setConfidenceMode(cm);
       if ('storage' in navigator && 'estimate' in navigator.storage) {
@@ -113,6 +117,17 @@ export default function SettingsPage() {
     }
     setLeechError(null);
     await setSetting('leech_threshold', String(num));
+  };
+
+  const saveSiblingBury = async (v: string) => {
+    setSiblingBuryMin(v);
+    const num = parseFloat(v);
+    if (!Number.isFinite(num) || num < 0 || num > 60) {
+      setSiblingBuryError('Must be a number between 0 and 60 (0 disables).');
+      return;
+    }
+    setSiblingBuryError(null);
+    await setSetting('sibling_bury_minutes', String(num));
   };
 
   const nuke = async () => {
@@ -235,6 +250,22 @@ export default function SettingsPage() {
           ) : (
             <div className="text-2xs text-dark-500 mt-1.5 font-light">
               When a card&rsquo;s lapses cross this number, it&rsquo;s auto-flagged as broken so you see it in the Trouble lane.
+            </div>
+          )}
+        </label>
+
+        <label className="block mt-5">
+          <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Sibling bury delay (minutes)</div>
+          <input
+            value={siblingBuryMin}
+            onChange={e => saveSiblingBury(e.target.value)}
+            className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+          />
+          {siblingBuryError ? (
+            <div className="text-2xs text-crimson-300 mt-1.5 font-light">{siblingBuryError}</div>
+          ) : (
+            <div className="text-2xs text-dark-500 mt-1.5 font-light">
+              After you rate a card, sibling cards on the same note (e.g. c2, c3 on a cloze) hide for this many minutes so they don&rsquo;t appear back-to-back. 5 is the default. 0 disables sibling burying entirely.
             </div>
           )}
         </label>

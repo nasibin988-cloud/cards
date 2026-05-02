@@ -14,6 +14,7 @@ import {
   rollbackReview,
   buryCard,
   suspendCard,
+  setSetting,
   unburryStaleCards,
   updateNote,
   bulkImport,
@@ -333,6 +334,36 @@ describe('sibling bury on cloze review', () => {
     const c2 = await db().cards.get(cards[1].id);
     expect(c2?.buried).toBe(false);
     expect(c2?.buriedUntil).toBeUndefined();
+  });
+
+  it('honors sibling_bury_minutes setting when set above default', async () => {
+    await setSetting('sibling_bury_minutes', '15');
+    const deck = await createDeck({ name: 'D' });
+    const { cards } = await createNote({
+      deckId: deck.id,
+      fields: { front: '{{c1::A}} and {{c2::B}}', back: '' },
+    });
+    const t0 = Date.now();
+    await recordReview(cards[0], 3, 1000);
+    const c2 = await db().cards.get(cards[1].id);
+    expect(c2?.buried).toBe(true);
+    // 15 minutes ≈ 900_000ms. Allow generous slack for test scheduling.
+    expect(c2?.buriedUntil).toBeGreaterThan(t0 + 14 * 60_000);
+    expect(c2?.buriedUntil).toBeLessThan(t0 + 16 * 60_000);
+  });
+
+  it('skips sibling burying when sibling_bury_minutes is 0', async () => {
+    await setSetting('sibling_bury_minutes', '0');
+    const deck = await createDeck({ name: 'D' });
+    const { cards } = await createNote({
+      deckId: deck.id,
+      fields: { front: '{{c1::A}} and {{c2::B}} and {{c3::C}}', back: '' },
+    });
+    const result = await recordReview(cards[0], 3, 1000);
+    expect(result.siblingsBurried).toBe(0);
+    const buried = (await db().cards.where('noteId').equals(cards[0].noteId).toArray())
+      .filter(c => c.buried);
+    expect(buried).toHaveLength(0);
   });
 
   it('unburryStaleCards releases legacy buried rows that lack buriedUntil', async () => {

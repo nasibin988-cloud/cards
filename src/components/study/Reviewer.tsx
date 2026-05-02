@@ -261,15 +261,23 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     await unburryStaleCards(studyDeckIds);
 
     // Consume prefetch if we have one and it matches the in-scope deck set.
+    // Re-read the cached card from the DB before serving it: the just-rated
+    // card may have buried siblings (sibling-bury), and one of those siblings
+    // could be sitting in the prefetch slot. Without this re-read the picker's
+    // bury filter is bypassed and c2 follows c1 immediately.
     const studySet = new Set(studyDeckIds);
     let next: Card | undefined;
     let n: Note | undefined;
     const cached = prefetchRef.current;
     prefetchRef.current = null;
     if (cached && studySet.has(cached.card.deckId)) {
-      next = cached.card;
-      n = cached.note;
-    } else {
+      const fresh = await getCard(cached.card.id);
+      if (fresh && !fresh.suspended && !fresh.buried) {
+        next = fresh;
+        n = cached.note;
+      }
+    }
+    if (!next) {
       next = noteIdFilter
         ? await getNextCardFromNoteSet(noteIdFilter)
         : await getNextCardForStudy(studyDeckIds);

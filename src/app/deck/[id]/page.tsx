@@ -9,6 +9,7 @@ import {
   browseNotes,
   bulkApply,
   listDecks,
+  listDescendantDeckIds,
   getDeck,
   getDeckCountsAggregate,
   listTagsInDeck,
@@ -826,6 +827,16 @@ function DeckActionsMenu({
     setResetting(true);
     try {
       const r = await resetDeckProgress(deckId);
+      // Reset must also clear any saved Reviewer "resume" state for this
+      // deck and its descendants — otherwise the next study session
+      // restores whichever card the user was on before the reset, instead
+      // of starting from the first card again.
+      try {
+        const ids = await listDescendantDeckIds(deckId, { includeSelf: true });
+        for (const id of ids) {
+          localStorage.removeItem(`cards:resume:${id}`);
+        }
+      } catch { /* localStorage cleanup is best-effort */ }
       await onResetDone();
       setResetResult({ count: r.cardsReset, reordered: r.reorderedByAnki });
       setResetConfirm(false);

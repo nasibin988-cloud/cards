@@ -1290,12 +1290,25 @@ export async function tagInterleaveOrder(cards: Card[]): Promise<Card[]> {
 }
 
 /**
- * How long a sibling-bury sticks before the picker is allowed to surface
- * the buried sibling again. Five minutes is enough to put a handful of
- * unrelated cards between c1 and c2 at typical study pace, and short
- * enough that c2 still gets practiced in the same session.
+ * Default sibling-bury duration when the user has not set
+ * `sibling_bury_minutes`. Five minutes puts a handful of unrelated cards
+ * between c1 and c2 at typical study pace, and is short enough that c2
+ * still gets practiced in the same session.
  */
-const SIBLING_BURY_MS = 5 * 60 * 1000;
+const DEFAULT_SIBLING_BURY_MS = 5 * 60 * 1000;
+
+/**
+ * Read the user-configured sibling-bury duration from settings. Returns 0
+ * to disable the feature entirely (siblings stay in the queue right
+ * after each other, like before the bury was introduced).
+ */
+async function getSiblingBuryMs(): Promise<number> {
+  const stored = await getSetting('sibling_bury_minutes');
+  if (stored === undefined) return DEFAULT_SIBLING_BURY_MS;
+  const m = parseFloat(stored);
+  if (!Number.isFinite(m) || m < 0) return DEFAULT_SIBLING_BURY_MS;
+  return Math.round(m * 60 * 1000);
+}
 
 export async function recordReview(
   card: Card,
@@ -1315,10 +1328,14 @@ export async function recordReview(
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowMs = tomorrow.getTime();
 
-  const siblingIds = (await dbi.cards
-    .where('noteId').equals(card.noteId)
-    .filter(c => c.id !== card.id && !c.suspended && !c.buried && c.due < tomorrowMs)
-    .primaryKeys()) as string[];
+  const buryMs = await getSiblingBuryMs();
+
+  const siblingIds = buryMs > 0
+    ? (await dbi.cards
+        .where('noteId').equals(card.noteId)
+        .filter(c => c.id !== card.id && !c.suspended && !c.buried && c.due < tomorrowMs)
+        .primaryKeys()) as string[]
+    : [];
 
   await dbi.transaction('rw', [dbi.cards, dbi.reviewLogs, dbi.settings], async () => {
     await dbi.cards.put(updatedCard);
@@ -1334,12 +1351,12 @@ export async function recordReview(
         siblingIds, // for undo of sibling burial
       }),
     });
-    // Sibling-bury: defer same-note siblings by SIBLING_BURY_MS so c2 doesn't
+    // Sibling-bury: defer same-note siblings by `buryMs` so c2 doesn't
     // immediately follow c1, but still gets practiced this session.
     if (siblingIds.length) {
       const siblings = await dbi.cards.where('id').anyOf(siblingIds).toArray();
       const t = now();
-      const until = t + SIBLING_BURY_MS;
+      const until = t + buryMs;
       await dbi.cards.bulkPut(
         siblings.map(s => ({ ...s, buried: true, buriedUntil: until, modifiedAt: t })),
       );
