@@ -799,6 +799,7 @@ function DeckActionsMenu({
   const [open, setOpen] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [resetResult, setResetResult] = useState<null | { count: number; reordered: boolean }>(null);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -806,10 +807,11 @@ function DeckActionsMenu({
       if (t && !t.closest?.('[data-deck-menu]')) {
         setOpen(false);
         setResetConfirm(false);
+        setResetResult(null);
       }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setOpen(false); setResetConfirm(false); }
+      if (e.key === 'Escape') { setOpen(false); setResetConfirm(false); setResetResult(null); }
     };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
@@ -823,9 +825,9 @@ function DeckActionsMenu({
     if (resetting) return;
     setResetting(true);
     try {
-      await resetDeckProgress(deckId);
+      const r = await resetDeckProgress(deckId);
       await onResetDone();
-      setOpen(false);
+      setResetResult({ count: r.cardsReset, reordered: r.reorderedByAnki });
       setResetConfirm(false);
     } finally {
       setResetting(false);
@@ -891,7 +893,22 @@ function DeckActionsMenu({
             Edit deck
           </Link>
           <div className="my-1 border-t border-white/[0.04]" aria-hidden />
-          {!resetConfirm ? (
+          {resetResult ? (
+            <div className="px-4 py-2 space-y-1">
+              <p className="text-xs font-light text-persian-200">
+                Reset {resetResult.count.toLocaleString()} card{resetResult.count === 1 ? '' : 's'}.
+              </p>
+              {resetResult.reordered ? (
+                <p className="text-2xs font-light text-dark-400">
+                  Reordered to Anki authoring order.
+                </p>
+              ) : (
+                <p className="text-2xs font-light text-dark-400">
+                  Order preserved as-is. Re-import the .apkg to enable Anki-order reordering.
+                </p>
+              )}
+            </div>
+          ) : !resetConfirm ? (
             <button
               role="menuitem"
               onClick={() => setResetConfirm(true)}

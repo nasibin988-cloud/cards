@@ -188,50 +188,70 @@ export async function deleteDeck(deckId: string): Promise<void> {
   await deleteDecks(ids);
 }
 
+export interface ResetSummary {
+  cardsReset: number;
+  /** True when notes carry ankiNoteId, so we restamped createdAt in Anki order. */
+  reorderedByAnki: boolean;
+}
+
 /**
- * Wipe FSRS state on every card in `deckId` and all its `::` descendants,
- * AND restamp `createdAt` so the picker walks them in authoring order.
+ * Wipe FSRS state on every card in `deckId` and all its `::` descendants.
+ * Suspended stays suspended (user intent). Buried clears (mid-flight). Review
+ * logs are kept for stats history.
  *
- * Sort key per note:
- *   1. `ankiNoteId` (numeric string, BigInt-compared) — set by .apkg
- *      import; preserves Anki's monotonic creation timestamp.
- *   2. fallback to `note.id` (ULID) — for notes created in-app or imported
- *      before ankiNoteId existed. Lexicographic ULID sort approximates
- *      creation order; it's not perfect for same-ms imports but it's the
- *      best signal available without re-importing the .apkg.
+ * Reordering is conservative: createdAt is rewritten ONLY if every note in
+ * scope has an `ankiNoteId` (i.e. they came from a .apkg import made by the
+ * current importer). In that case we sort by ankiNoteId and re-stamp
+ * createdAt so the picker walks Anki's authoring order exactly.
  *
- * Cards from the same note get adjacent createdAt slots (offset by their
- * cloze ord) so siblings stay together. Suspended stays suspended (user
- * intent). Buried clears (mid-flight state). Review logs are kept for
- * stats history.
+ * If even one note lacks ankiNoteId we leave all createdAt alone — falling
+ * back to a ULID-based guess used to corrupt working orderings on imports
+ * that already had good sequential createdAt. To restore order on legacy
+ * data, re-import the .apkg (the new importer stamps ankiNoteId) and run
+ * reset again.
  */
-export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: number }> {
+export async function resetDeckProgress(deckId: string): Promise<ResetSummary> {
   const dbi = db();
   const t = now();
   const deckIds = await listDescendantDeckIds(deckId, { includeSelf: true });
-  if (deckIds.length === 0) return { cardsReset: 0 };
+  if (deckIds.length === 0) return { cardsReset: 0, reorderedByAnki: false };
 
   const cards = await dbi.cards.where('deckId').anyOf(deckIds).toArray();
-  if (cards.length === 0) return { cardsReset: 0 };
+  if (cards.length === 0) return { cardsReset: 0, reorderedByAnki: false };
 
   const noteIds = [...new Set(cards.map(c => c.noteId))];
   const notes = await dbi.notes.where('id').anyOf(noteIds).toArray();
+  const allHaveAnkiId = notes.length > 0 && notes.every(n => n.ankiNoteId !== undefined);
 
+  const empty = emptyCard();
+
+  if (!allHaveAnkiId) {
+    // Just wipe FSRS state. Don't touch createdAt — whatever the importer
+    // set is the best signal we have for order.
+    await dbi.transaction('rw', dbi.cards, async () => {
+      await dbi.cards.bulkPut(cards.map(c => ({
+        ...c,
+        ...empty,
+        suspended: c.suspended,
+        buried: false,
+        buriedUntil: undefined,
+        modifiedAt: t,
+      })));
+    });
+    return { cardsReset: cards.length, reorderedByAnki: false };
+  }
+
+  // Reorder by Anki authoring order. ankiNoteId is a numeric string that
+  // overflows JS Number — compare as BigInt.
   notes.sort((a, b) => {
-    if (a.ankiNoteId !== undefined && b.ankiNoteId !== undefined) {
-      const av = BigInt(a.ankiNoteId), bv = BigInt(b.ankiNoteId);
-      return av < bv ? -1 : av > bv ? 1 : 0;
-    }
-    if (a.ankiNoteId !== undefined) return -1;
-    if (b.ankiNoteId !== undefined) return 1;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    const av = BigInt(a.ankiNoteId!), bv = BigInt(b.ankiNoteId!);
+    return av < bv ? -1 : av > bv ? 1 : 0;
   });
 
   const SLOT = 1000;
   const noteIdxById = new Map<string, number>();
   notes.forEach((n, idx) => noteIdxById.set(n.id, idx));
 
-  const empty = emptyCard();
   await dbi.transaction('rw', dbi.notes, dbi.cards, async () => {
     await dbi.notes.bulkPut(notes.map((n, idx) => ({
       ...n,
@@ -253,7 +273,7 @@ export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: n
     }));
   });
 
-  return { cardsReset: cards.length };
+  return { cardsReset: cards.length, reorderedByAnki: true };
 }
 
 /** Delete the given decks and all their notes/cards/reviewLogs atomically. */
@@ -982,8 +1002,13 @@ export async function getDeckCounts(deckId: string | string[], at: Date = new Da
     : db().cards.where('deckId').anyOf(ids);
   const all = await cursor.toArray();
   const counts = { new: 0, learning: 0, review: 0, total: 0 };
+  // Buried cards still count toward their state — burying is a transient
+  // hide-from-picker, not a state transition. Excluding them made the
+  // header counts shrink mid-session ("rate one cloze, watch 3 disappear
+  // from NEW") instead of reflecting the actual deck composition.
+  // Suspended cards are user-initiated parking and are excluded.
   for (const c of all) {
-    if (c.suspended || c.buried) continue;
+    if (c.suspended) continue;
     counts.total++;
     if (c.state === 'new') counts.new++;
     else if (c.state === 'learning' || c.state === 'relearning') counts.learning++;
