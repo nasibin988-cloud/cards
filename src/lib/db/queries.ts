@@ -188,6 +188,37 @@ export async function deleteDeck(deckId: string): Promise<void> {
   await deleteDecks(ids);
 }
 
+/**
+ * Wipe FSRS state on every card in `deckId` and all its `::` descendants,
+ * returning them to `state: 'new'` with a fresh empty FSRS card. Suspended
+ * stays suspended (user-level intent), buried clears (mid-flight state).
+ * Notes, cards, deck hierarchy, tags, createdAt — all preserved. Only the
+ * scheduling fields move. Review logs are kept for stats history; the
+ * picker doesn't read them.
+ */
+export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: number }> {
+  const dbi = db();
+  const t = now();
+  const deckIds = await listDescendantDeckIds(deckId, { includeSelf: true });
+  if (deckIds.length === 0) return { cardsReset: 0 };
+
+  const cards = await dbi.cards.where('deckId').anyOf(deckIds).toArray();
+  if (cards.length === 0) return { cardsReset: 0 };
+
+  const empty = emptyCard();
+  await dbi.transaction('rw', dbi.cards, async () => {
+    await dbi.cards.bulkPut(cards.map(c => ({
+      ...c,
+      ...empty,
+      suspended: c.suspended,
+      buried: false,
+      modifiedAt: t,
+    })));
+  });
+
+  return { cardsReset: cards.length };
+}
+
 /** Delete the given decks and all their notes/cards/reviewLogs atomically. */
 export async function deleteDecks(deckIds: string[]): Promise<void> {
   if (deckIds.length === 0) return;

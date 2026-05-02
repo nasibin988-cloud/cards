@@ -12,6 +12,7 @@ import {
   getDeck,
   getDeckCountsAggregate,
   listTagsInDeck,
+  resetDeckProgress,
   undoBulk,
   type BulkAction,
   type BulkUndo,
@@ -227,7 +228,9 @@ export default function DeckPage({ params }: { params: Promise<{ id: string }> }
           {counts && <InlineStats counts={counts} />}
           <DeckActionsMenu
             deckId={deck.id}
+            deckName={deck.name}
             onFind={() => setFindOpen(true)}
+            onResetDone={refreshSidebars}
           />
         </div>
       </div>
@@ -779,15 +782,32 @@ function StatPill({ label, value, tone }: { label: string; value: number; tone: 
  * Overflow menu for low-frequency deck actions (Add note / Find / Edit).
  * Collapsing them frees horizontal space so the action row stays one line.
  */
-function DeckActionsMenu({ deckId, onFind }: { deckId: string; onFind: () => void }) {
+function DeckActionsMenu({
+  deckId,
+  deckName,
+  onFind,
+  onResetDone,
+}: {
+  deckId: string;
+  deckName: string;
+  onFind: () => void;
+  onResetDone: () => Promise<void>;
+}) {
   const [open, setOpen] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t && !t.closest?.('[data-deck-menu]')) setOpen(false);
+      if (t && !t.closest?.('[data-deck-menu]')) {
+        setOpen(false);
+        setResetConfirm(false);
+      }
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setOpen(false); setResetConfirm(false); }
+    };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
     return () => {
@@ -795,6 +815,19 @@ function DeckActionsMenu({ deckId, onFind }: { deckId: string; onFind: () => voi
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
+
+  const doReset = useCallback(async () => {
+    if (resetting) return;
+    setResetting(true);
+    try {
+      await resetDeckProgress(deckId);
+      await onResetDone();
+      setOpen(false);
+      setResetConfirm(false);
+    } finally {
+      setResetting(false);
+    }
+  }, [deckId, onResetDone, resetting]);
   return (
     <div className="relative" data-deck-menu>
       <button
@@ -854,6 +887,39 @@ function DeckActionsMenu({ deckId, onFind }: { deckId: string; onFind: () => voi
           >
             Edit deck
           </Link>
+          <div className="my-1 border-t border-white/[0.04]" aria-hidden />
+          {!resetConfirm ? (
+            <button
+              role="menuitem"
+              onClick={() => setResetConfirm(true)}
+              className="block w-full text-left px-4 py-2 text-sm font-light text-crimson-300 hover:text-crimson-200 hover:bg-crimson-900/20 transition"
+            >
+              Reset progress…
+            </button>
+          ) : (
+            <div className="px-4 py-2 space-y-2">
+              <p className="text-xs font-light text-dark-200">
+                Reset every card in <span className="font-mono text-dark-100">{deckName}</span> and
+                its sub-decks to NEW. Stats history is preserved.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={doReset}
+                  disabled={resetting}
+                  className="px-3 py-1 rounded-lg text-xs font-light bg-crimson-900/40 text-crimson-100 border border-crimson-700/40 hover:bg-crimson-900/60 transition disabled:opacity-50"
+                >
+                  {resetting ? 'Resetting…' : 'Confirm reset'}
+                </button>
+                <button
+                  onClick={() => setResetConfirm(false)}
+                  disabled={resetting}
+                  className="px-3 py-1 rounded-lg text-xs font-light text-dark-300 hover:text-dark-100 transition"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
