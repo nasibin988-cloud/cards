@@ -392,3 +392,26 @@ input.type-cloze:focus {
 .heat-2 { background: rgba(143, 114, 64, 0.40); }
 .heat-3 { background: rgba(168, 135, 79, 0.60); }
 .heat-4 { background: rgba(212, 192, 156, 0.85); }
+
+/* ─── PWA window-controls-overlay ───────────────────────────────── */
+/* When installed as a desktop PWA with display_override:
+   window-controls-overlay, Chrome hides its own title bar and lets the
+   OS window controls (macOS traffic lights / Win caption buttons) float
+   over our content. Reserve a left gutter so the header clears them,
+   and make the header an OS drag handle so the window stays movable —
+   except for interactive children. */
+@media (display-mode: window-controls-overlay) {
+  header {
+    padding-left: env(titlebar-area-x, 0);
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+  header button,
+  header a,
+  header input,
+  header select,
+  header [role="button"] {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+}
