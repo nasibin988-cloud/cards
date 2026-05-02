@@ -80,8 +80,11 @@ from `/opt/cards/data` on the host). One-time setup on the Hetzner box:
 
 ```bash
 # Storage dir + a strong bearer token in the env file next to compose.
+# The chown matters: the container runs as the `node` user (UID 1000),
+# so a root-owned /opt/cards/data would 500 on every PUT.
 ssh root@89.167.33.158 '
   mkdir -p /opt/cards/data &&
+  chown -R 1000:1000 /opt/cards/data &&
   cd /opt/cards &&
   printf "CARDS_SYNC_TOKEN=%s\n" "$(openssl rand -hex 32)" > .env &&
   chmod 600 .env &&
