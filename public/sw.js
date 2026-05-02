@@ -10,7 +10,7 @@
  *   - bypass /api/*, anthropic.com, and any non-GET request.
  */
 
-const VERSION = 'v4-2026-05-01';
+const VERSION = 'v5-2026-05-02';
 const STATIC_CACHE = `cards-static-${VERSION}`;
 const RUNTIME_CACHE = `cards-runtime-${VERSION}`;
 const IMAGE_CACHE = `cards-images-${VERSION}`;
@@ -35,7 +35,11 @@ const SHELL_URLS = [
   `${BASE}/exam`,
   `${BASE}/read`,
   `${BASE}/generate`,
-  `${BASE}/manifest.json`,
+  // NOTE: manifest.json deliberately NOT precached. Chrome reads the
+  // manifest through the SW during PWA install/update, so caching it
+  // makes display/display_override changes (e.g. window-controls-overlay)
+  // get stuck on whatever was cached at SW-install time. The fetch
+  // handler below also bypasses it for the same reason.
   `${BASE}/sql-wasm/sql-wasm.wasm`,
   `${BASE}/sql-wasm/sql-wasm-browser.wasm`,
   `${BASE}/pdf.worker.min.mjs`,
@@ -73,6 +77,10 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith(`${BASE}/api/`)) return;
   if (url.host.includes('api.anthropic.com')) return;
   if (url.host.includes('anthropic.com')) return;
+  // manifest.json must hit the network so PWA install/update sees the
+  // current display_override etc.; SW caching kept Chrome locked into
+  // a pre-WCO manifest across reinstalls.
+  if (url.pathname === `${BASE}/manifest.json`) return;
 
   // Static assets: cache-first. The .mjs worker for pdfjs is immutable per
   // file content (we ship a fixed version under public/), so it belongs
