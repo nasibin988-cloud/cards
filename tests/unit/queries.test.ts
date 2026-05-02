@@ -24,6 +24,7 @@ import {
 import { db } from '@/lib/db/dexie';
 import { id } from '@/lib/ulid';
 import { emptyCard } from '@/lib/fsrs/scheduler';
+import type { Card } from '@/lib/db/schema';
 
 beforeEach(async () => {
   // Clear all tables between tests so each runs in isolation.
@@ -413,6 +414,67 @@ describe('buryCard / suspendCard / unburryStaleCards', () => {
     await unburryStaleCards(deck.id);
     const c = await db().cards.get(cards[0].id);
     expect(c?.buried).toBe(false);
+  });
+
+  it('resetDeckProgress wipes FSRS state and re-sorts by ankiNoteId', async () => {
+    const { resetDeckProgress, getNextCardForStudy } = await import('@/lib/db/queries');
+    const deck = await createDeck({ name: 'M' });
+    // Three notes with all-tied createdAt (mimics legacy broken import).
+    // Author them out of intended order; ankiNoteId encodes the right one.
+    const t0 = Date.now();
+    const a = await createNote({ deckId: deck.id, fields: { front: 'A', back: 'a' } });
+    const b = await createNote({ deckId: deck.id, fields: { front: 'B', back: 'b' } });
+    const c = await createNote({ deckId: deck.id, fields: { front: 'C', back: 'c' } });
+
+    // Force same createdAt + assign Anki ids in B, A, C order so the desired
+    // study sequence is B → A → C, NOT the lexical ULID order.
+    await db().notes.bulkPut([
+      { ...a.note, createdAt: t0, ankiNoteId: '1000000002' },
+      { ...b.note, createdAt: t0, ankiNoteId: '1000000001' },
+      { ...c.note, createdAt: t0, ankiNoteId: '1000000003' },
+    ]);
+    await db().cards.bulkPut([
+      { ...a.cards[0], createdAt: t0, state: 'review', due: t0 - 1000, reps: 5 },
+      { ...b.cards[0], createdAt: t0, state: 'learning', due: t0 - 1000, reps: 2 },
+      { ...c.cards[0], createdAt: t0 },
+    ] as Card[]);
+
+    const r = await resetDeckProgress(deck.id);
+    expect(r.cardsReset).toBe(3);
+
+    // After reset all cards back to NEW.
+    const cards = await db().cards.where('deckId').equals(deck.id).toArray();
+    expect(cards.every(card => card.state === 'new')).toBe(true);
+    expect(cards.every(card => card.reps === 0)).toBe(true);
+
+    // And the picker pulls B first because its ankiNoteId is lowest.
+    const next = await getNextCardForStudy(deck.id);
+    expect(next?.noteId).toBe(b.note.id);
+  });
+
+  it('resetDeckProgress falls back to noteId ULID when ankiNoteId is absent', async () => {
+    const { resetDeckProgress, getNextCardForStudy } = await import('@/lib/db/queries');
+    const deck = await createDeck({ name: 'M' });
+    // Make first authored, second authored with a delay so ULIDs differ
+    // by ms — this is the realistic legacy case.
+    const a = await createNote({ deckId: deck.id, fields: { front: 'A', back: 'a' } });
+    await new Promise(r => setTimeout(r, 5));
+    const b = await createNote({ deckId: deck.id, fields: { front: 'B', back: 'b' } });
+    // Stomp createdAt so the picker can't disambiguate.
+    const t0 = Date.now();
+    await db().notes.bulkPut([
+      { ...a.note, createdAt: t0 },
+      { ...b.note, createdAt: t0 },
+    ]);
+    await db().cards.bulkPut([
+      { ...a.cards[0], createdAt: t0 } as Card,
+      { ...b.cards[0], createdAt: t0 } as Card,
+    ]);
+
+    await resetDeckProgress(deck.id);
+    const next = await getNextCardForStudy(deck.id);
+    // a.note.id (older ULID) sorts lexicographically before b.note.id.
+    expect(next?.noteId).toBe(a.note.id);
   });
 
   it('unburryStaleCards keeps cards whose buriedUntil is still ahead', async () => {

@@ -190,11 +190,20 @@ export async function deleteDeck(deckId: string): Promise<void> {
 
 /**
  * Wipe FSRS state on every card in `deckId` and all its `::` descendants,
- * returning them to `state: 'new'` with a fresh empty FSRS card. Suspended
- * stays suspended (user-level intent), buried clears (mid-flight state).
- * Notes, cards, deck hierarchy, tags, createdAt — all preserved. Only the
- * scheduling fields move. Review logs are kept for stats history; the
- * picker doesn't read them.
+ * AND restamp `createdAt` so the picker walks them in authoring order.
+ *
+ * Sort key per note:
+ *   1. `ankiNoteId` (numeric string, BigInt-compared) — set by .apkg
+ *      import; preserves Anki's monotonic creation timestamp.
+ *   2. fallback to `note.id` (ULID) — for notes created in-app or imported
+ *      before ankiNoteId existed. Lexicographic ULID sort approximates
+ *      creation order; it's not perfect for same-ms imports but it's the
+ *      best signal available without re-importing the .apkg.
+ *
+ * Cards from the same note get adjacent createdAt slots (offset by their
+ * cloze ord) so siblings stay together. Suspended stays suspended (user
+ * intent). Buried clears (mid-flight state). Review logs are kept for
+ * stats history.
  */
 export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: number }> {
   const dbi = db();
@@ -205,16 +214,43 @@ export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: n
   const cards = await dbi.cards.where('deckId').anyOf(deckIds).toArray();
   if (cards.length === 0) return { cardsReset: 0 };
 
+  const noteIds = [...new Set(cards.map(c => c.noteId))];
+  const notes = await dbi.notes.where('id').anyOf(noteIds).toArray();
+
+  notes.sort((a, b) => {
+    if (a.ankiNoteId !== undefined && b.ankiNoteId !== undefined) {
+      const av = BigInt(a.ankiNoteId), bv = BigInt(b.ankiNoteId);
+      return av < bv ? -1 : av > bv ? 1 : 0;
+    }
+    if (a.ankiNoteId !== undefined) return -1;
+    if (b.ankiNoteId !== undefined) return 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  const SLOT = 1000;
+  const noteIdxById = new Map<string, number>();
+  notes.forEach((n, idx) => noteIdxById.set(n.id, idx));
+
   const empty = emptyCard();
-  await dbi.transaction('rw', dbi.cards, async () => {
-    await dbi.cards.bulkPut(cards.map(c => ({
-      ...c,
-      ...empty,
-      suspended: c.suspended,
-      buried: false,
-      buriedUntil: undefined,
+  await dbi.transaction('rw', dbi.notes, dbi.cards, async () => {
+    await dbi.notes.bulkPut(notes.map((n, idx) => ({
+      ...n,
+      createdAt: t + idx * SLOT,
       modifiedAt: t,
     })));
+    await dbi.cards.bulkPut(cards.map(c => {
+      const idx = noteIdxById.get(c.noteId) ?? 0;
+      const ord = (c.clozeOrd ?? 1) - 1;
+      return {
+        ...c,
+        ...empty,
+        suspended: c.suspended,
+        buried: false,
+        buriedUntil: undefined,
+        createdAt: t + idx * SLOT + ord,
+        modifiedAt: t,
+      };
+    }));
   });
 
   return { cardsReset: cards.length };

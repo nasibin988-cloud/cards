@@ -203,6 +203,7 @@ export async function importApkg(
       modelId: model.type === 1 ? 'cloze' : 'basic',
       fields: mapped,
       tags: (an.tags ?? '').split(/\s+/).map(s => s.trim()).filter(Boolean),
+      ankiNoteId: an.id,
       createdAt: noteCreatedAt,
       modifiedAt: noteCreatedAt,
     };

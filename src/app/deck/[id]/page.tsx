@@ -52,7 +52,10 @@ export default function DeckPage({ params }: { params: Promise<{ id: string }> }
   // are URL-persisted but never folded into the q= operator string. Both
   // default to the most natural choice.
   type SortKey = 'newest' | 'oldest' | 'due' | 'lapses' | 'hardest';
-  const initialSort: SortKey = (searchParams?.get('sort') as SortKey) || 'newest';
+  // Default to authoring order (oldest-first) so the browse list reads in the
+  // same direction as the study queue picks. Newest-first felt backwards for
+  // long imported decks where "first" = first authored, not most recent edit.
+  const initialSort: SortKey = (searchParams?.get('sort') as SortKey) || 'oldest';
   const [sort, setSort] = useState<SortKey>(initialSort);
   const initialGroup = searchParams?.get('group') === 'deck';
   const [groupByDeck, setGroupByDeck] = useState<boolean>(initialGroup);
@@ -110,7 +113,7 @@ export default function DeckPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => {
     const params = new URLSearchParams(searchParams?.toString() ?? '');
     if (searchInput) params.set('q', searchInput); else params.delete('q');
-    if (sort !== 'newest') params.set('sort', sort); else params.delete('sort');
+    if (sort !== 'oldest') params.set('sort', sort); else params.delete('sort');
     if (groupByDeck) params.set('group', 'deck'); else params.delete('group');
     const qs = params.toString();
     const cur = searchParams?.toString() ?? '';

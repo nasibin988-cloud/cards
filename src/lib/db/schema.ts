@@ -75,6 +75,13 @@ export interface Note {
   occlusions?: OcclusionRect[];
   /** When set on a basic note, generates one card per sibling instead of one. */
   siblings?: SiblingDef[];
+  /**
+   * Original Anki note id from the .apkg this note was imported from. Stored
+   * as a string because Anki ids are 64-bit timestamps (overflow JS Number).
+   * Lets reset/resync deterministically restore authoring order without the
+   * .apkg in hand.
+   */
+  ankiNoteId?: string;
   createdAt: number;
   modifiedAt: number;
 }
