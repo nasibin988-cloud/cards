@@ -405,7 +405,7 @@ export default function SyncPanel() {
             <button
               onClick={doPull}
               disabled={busy !== null || !passphrase || !status_?.remoteVersion}
-              className="px-4 py-2 rounded-xl text-sm text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] transition border border-white/[0.06]"
+              className="btn-gradient px-4 py-2 rounded-xl text-sm"
             >
               {busy === 'pull' ? 'Pulling…' : 'Pull now'}
             </button>
