@@ -56,22 +56,24 @@ describe('bulkApply / undoBulk', () => {
     }
   });
 
-  it('bury sets buried=true and stamps buriedAt; undo reverses it', async () => {
+  it('bury sets buried=true with buriedUntil at tomorrow; undo reverses it', async () => {
     const { noteIds } = await makeDeckWithNotes(2);
-    const before = Date.now();
+    const tomorrow = new Date();
+    tomorrow.setHours(0, 0, 0, 0);
+    tomorrow.setDate(tomorrow.getDate() + 1);
     const undo = await bulkApply(noteIds, { kind: 'bury' });
 
     for (const id of noteIds) {
       const cards = await listCardsByNote(id);
       expect(cards.every(c => c.buried)).toBe(true);
-      expect(cards.every(c => (c.buriedAt ?? 0) >= before)).toBe(true);
+      expect(cards.every(c => c.buriedUntil === tomorrow.getTime())).toBe(true);
     }
 
     await undoBulk(undo);
     for (const id of noteIds) {
       const cards = await listCardsByNote(id);
       expect(cards.every(c => !c.buried)).toBe(true);
-      expect(cards.every(c => c.buriedAt === undefined)).toBe(true);
+      expect(cards.every(c => c.buriedUntil === undefined)).toBe(true);
     }
   });
 

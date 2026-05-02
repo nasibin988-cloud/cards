@@ -212,7 +212,7 @@ export async function resetDeckProgress(deckId: string): Promise<{ cardsReset: n
       ...empty,
       suspended: c.suspended,
       buried: false,
-      buriedAt: undefined,
+      buriedUntil: undefined,
       modifiedAt: t,
     })));
   });
@@ -1228,6 +1228,14 @@ export async function tagInterleaveOrder(cards: Card[]): Promise<Card[]> {
   return order;
 }
 
+/**
+ * How long a sibling-bury sticks before the picker is allowed to surface
+ * the buried sibling again. Five minutes is enough to put a handful of
+ * unrelated cards between c1 and c2 at typical study pace, and short
+ * enough that c2 still gets practiced in the same session.
+ */
+const SIBLING_BURY_MS = 5 * 60 * 1000;
+
 export async function recordReview(
   card: Card,
   rating: Rating,
@@ -1265,13 +1273,14 @@ export async function recordReview(
         siblingIds, // for undo of sibling burial
       }),
     });
-    // Burry siblings via direct update so their existing state is preserved.
-    // Stamp buriedAt so unburryStaleCards can defer them past today.
+    // Sibling-bury: defer same-note siblings by SIBLING_BURY_MS so c2 doesn't
+    // immediately follow c1, but still gets practiced this session.
     if (siblingIds.length) {
       const siblings = await dbi.cards.where('id').anyOf(siblingIds).toArray();
       const t = now();
+      const until = t + SIBLING_BURY_MS;
       await dbi.cards.bulkPut(
-        siblings.map(s => ({ ...s, buried: true, buriedAt: t, modifiedAt: t })),
+        siblings.map(s => ({ ...s, buried: true, buriedUntil: until, modifiedAt: t })),
       );
     }
   });
@@ -1324,7 +1333,7 @@ export async function rollbackReview(cardId: string, logId: string): Promise<boo
     if (Array.isArray(restore.siblingIds) && restore.siblingIds.length) {
       const siblings = await dbi.cards.where('id').anyOf(restore.siblingIds).toArray();
       await dbi.cards.bulkPut(
-        siblings.map(s => ({ ...s, buried: false, buriedAt: undefined, modifiedAt: now() })),
+        siblings.map(s => ({ ...s, buried: false, buriedUntil: undefined, modifiedAt: now() })),
       );
     }
     await dbi.reviewLogs.delete(logId);
@@ -1333,13 +1342,15 @@ export async function rollbackReview(cardId: string, logId: string): Promise<boo
   return true;
 }
 
-/** Bury the card until next day's start. */
+/** Manual bury: hide the card until tomorrow's local day-start (Anki convention). */
 export async function buryCard(cardId: string): Promise<void> {
-  const t = now();
+  const tomorrow = new Date();
+  tomorrow.setHours(0, 0, 0, 0);
+  tomorrow.setDate(tomorrow.getDate() + 1);
   await db().cards.update(cardId, {
     buried: true,
-    buriedAt: t,
-    modifiedAt: t,
+    buriedUntil: tomorrow.getTime(),
+    modifiedAt: now(),
   });
 }
 
@@ -1349,34 +1360,26 @@ export async function suspendCard(cardId: string): Promise<void> {
 }
 
 /**
- * Unbury cards in a deck whose burial period has elapsed — i.e. they were
- * buried before the start of today. Called at the top of every fetchNext.
+ * Release any cards whose bury window has expired. Called at the top of
+ * every fetchNext, so within the same study session a sibling-buried c2
+ * pops back into the queue once SIBLING_BURY_MS has elapsed since c1 was
+ * rated.
  *
- * The check is strictly `buriedAt < startOfToday`, NOT `due <= now`. New
- * cards have due = creation time (always in the past), so a due-based
- * filter would unbury same-session siblings the instant the next card
- * loads, defeating sibling-bury entirely. buriedAt records the burial
- * moment; we leave the burial in place until the local day rolls over.
- *
- * Legacy rows from before buriedAt was added carry no timestamp; we treat
- * them as expired (any pre-fix bury is older than this session) so users
- * aren't stuck with permanently buried cards after upgrading.
+ * Legacy rows from before buriedUntil existed have `buried: true` with no
+ * timestamp; we treat those as expired so upgrading users aren't stuck.
  */
 export async function unburryStaleCards(deckId: string | string[]): Promise<void> {
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const dayBoundary = startOfToday.getTime();
+  const t = Date.now();
   const ids = Array.isArray(deckId) ? deckId : [deckId];
   const cursor = ids.length === 1
     ? db().cards.where('deckId').equals(ids[0])
     : db().cards.where('deckId').anyOf(ids);
   const stale = await cursor
-    .filter(c => c.buried && (c.buriedAt === undefined || c.buriedAt < dayBoundary))
+    .filter(c => c.buried && (c.buriedUntil === undefined || c.buriedUntil <= t))
     .toArray();
   if (stale.length === 0) return;
-  const t = now();
   await db().cards.bulkPut(
-    stale.map(c => ({ ...c, buried: false, buriedAt: undefined, modifiedAt: t })),
+    stale.map(c => ({ ...c, buried: false, buriedUntil: undefined, modifiedAt: t })),
   );
 }
 
@@ -1423,7 +1426,7 @@ export async function unsuspendCard(cardId: string): Promise<void> {
 
 /** Lift the buried flag without resetting due date. */
 export async function unburyCard(cardId: string): Promise<void> {
-  await db().cards.update(cardId, { buried: false, buriedAt: undefined, modifiedAt: now() });
+  await db().cards.update(cardId, { buried: false, buriedUntil: undefined, modifiedAt: now() });
 }
 
 /** Send a card back to a 'new' state, wiping FSRS history. */
@@ -1631,7 +1634,7 @@ export interface BulkUndo {
   cards: Array<Pick<Card,
     | 'id' | 'deckId' | 'due' | 'stability' | 'difficulty'
     | 'elapsedDays' | 'scheduledDays' | 'learningSteps' | 'reps' | 'lapses'
-    | 'state' | 'lastReview' | 'suspended' | 'buried' | 'buriedAt'>>;
+    | 'state' | 'lastReview' | 'suspended' | 'buried' | 'buriedUntil'>>;
   /** For delete: full Note + Card rows so we can restore. */
   deletedNotes?: Note[];
   deletedCards?: Card[];
@@ -1700,17 +1703,18 @@ export async function bulkApply(
         const tomorrow = new Date();
         tomorrow.setHours(0, 0, 0, 0);
         tomorrow.setDate(tomorrow.getDate() + 1);
+        const buriedUntil = tomorrow.getTime();
         await dbi.cards.bulkPut(cards.map(c => ({
           ...c,
           buried: true,
-          buriedAt: t,
+          buriedUntil,
           modifiedAt: t,
         })));
         break;
       }
       case 'unbury':
         await dbi.cards.bulkPut(cards.map(c => ({
-          ...c, buried: false, buriedAt: undefined, modifiedAt: t,
+          ...c, buried: false, buriedUntil: undefined, modifiedAt: t,
         })));
         break;
       case 'reset': {
@@ -1720,7 +1724,7 @@ export async function bulkApply(
           ...empty,
           suspended: c.suspended,
           buried: false,
-          buriedAt: undefined,
+          buriedUntil: undefined,
           modifiedAt: t,
         })));
         break;
@@ -1816,7 +1820,7 @@ function snapshotCard(c: Card): BulkUndo['cards'][number] {
     lastReview: c.lastReview,
     suspended: c.suspended,
     buried: c.buried,
-    buriedAt: c.buriedAt,
+    buriedUntil: c.buriedUntil,
   };
 }
 

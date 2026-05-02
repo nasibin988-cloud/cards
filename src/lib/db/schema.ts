@@ -102,12 +102,16 @@ export interface Card {
   suspended: boolean;
   buried: boolean;
   /**
-   * When the card was last buried (ms epoch). Used by unburryStaleCards to
-   * tell "buried-this-session" from "buried-yesterday-or-earlier". Without
-   * this, the unbury filter has no clock to compare against and ends up
-   * unburying same-session siblings immediately.
+   * Wall-clock ms when this bury expires. The picker excludes cards while
+   * `buried === true`; `unburryStaleCards` clears the flag once now passes
+   * `buriedUntil`. Two distinct durations:
+   *   - sibling-bury (auto): a few minutes — long enough to put cards in
+   *     between c1 and c2, short enough that c2 still gets practiced today.
+   *   - manual bury: tomorrow's day-start — Anki convention, "hide for today".
+   * Pre-fix legacy rows with `buried: true` and no `buriedUntil` are treated
+   * as expired so users aren't stranded after upgrade.
    */
-  buriedAt?: number;
+  buriedUntil?: number;
   createdAt: number;
   modifiedAt: number;
 }
