@@ -285,6 +285,67 @@ describe('sibling bury on cloze review', () => {
     const c2 = await db().cards.get(cards[1].id);
     expect(c2?.buried).toBe(false);
   });
+
+  it('sibling bury survives unburryStaleCards within the same session', async () => {
+    // Regression: previously unburryStaleCards filtered on `due <= now`,
+    // and new cards have due = creation time (always in the past), so
+    // same-session siblings unburied immediately on the next fetchNext.
+    // With buriedAt + day-boundary check, the bury must persist.
+    const deck = await createDeck({ name: 'D' });
+    const { cards } = await createNote({
+      deckId: deck.id,
+      fields: { front: '{{c1::A}} and {{c2::B}}', back: '' },
+    });
+
+    await recordReview(cards[0], 3, 1000);
+    expect((await db().cards.get(cards[1].id))?.buried).toBe(true);
+
+    // This is what fetchNext calls right before picking the next card.
+    await unburryStaleCards(deck.id);
+
+    const c2 = await db().cards.get(cards[1].id);
+    expect(c2?.buried).toBe(true);              // still buried
+    expect(c2?.buriedAt).toBeGreaterThan(0);    // and stamped
+
+    // The picker also must not return c2 while it's buried.
+    const next = await getNextCardForStudy(deck.id);
+    expect(next?.id).not.toBe(cards[1].id);
+  });
+
+  it('unburryStaleCards releases siblings buried before today', async () => {
+    const deck = await createDeck({ name: 'D' });
+    const { cards } = await createNote({
+      deckId: deck.id,
+      fields: { front: '{{c1::A}} and {{c2::B}}', back: '' },
+    });
+    // Manually backdate the bury to before today so the day-boundary
+    // path fires (the actual bury would happen then; we're simulating
+    // "user returns the next day").
+    const yesterdayMs = Date.now() - 36 * 3600 * 1000;
+    await db().cards.update(cards[1].id, { buried: true, buriedAt: yesterdayMs });
+
+    await unburryStaleCards(deck.id);
+
+    const c2 = await db().cards.get(cards[1].id);
+    expect(c2?.buried).toBe(false);
+    expect(c2?.buriedAt).toBeUndefined();
+  });
+
+  it('unburryStaleCards releases legacy buried rows that lack buriedAt', async () => {
+    // Pre-fix data: cards stuck buried with no buriedAt timestamp. Treat
+    // them as expired so users aren't trapped after upgrading.
+    const deck = await createDeck({ name: 'D' });
+    const { cards } = await createNote({
+      deckId: deck.id,
+      fields: { front: '{{c1::A}} and {{c2::B}}', back: '' },
+    });
+    await db().cards.update(cards[1].id, { buried: true });
+
+    await unburryStaleCards(deck.id);
+
+    const c2 = await db().cards.get(cards[1].id);
+    expect(c2?.buried).toBe(false);
+  });
 });
 
 describe('rollbackReview', () => {
@@ -318,16 +379,14 @@ describe('rollbackReview', () => {
 });
 
 describe('buryCard / suspendCard / unburryStaleCards', () => {
-  it('buryCard sets buried + due to tomorrow midnight', async () => {
+  it('buryCard marks the card buried and stamps buriedAt', async () => {
     const deck = await createDeck({ name: 'D' });
     const { cards } = await createNote({ deckId: deck.id, fields: { front: 'q', back: 'a' } });
+    const before = Date.now();
     await buryCard(cards[0].id);
     const c = await db().cards.get(cards[0].id);
     expect(c?.buried).toBe(true);
-    const tomorrow = new Date();
-    tomorrow.setHours(0, 0, 0, 0);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    expect(c?.due).toBe(tomorrow.getTime());
+    expect(c?.buriedAt).toBeGreaterThanOrEqual(before);
   });
 
   it('suspended cards are excluded from getNextCardForStudy', async () => {
@@ -339,25 +398,20 @@ describe('buryCard / suspendCard / unburryStaleCards', () => {
     expect(next?.id).toBe(b[0].id);
   });
 
-  it('unburryStaleCards clears the buried flag for cards whose due has passed', async () => {
+  it('unburryStaleCards clears cards buried before today', async () => {
     const deck = await createDeck({ name: 'D' });
     const { cards } = await createNote({ deckId: deck.id, fields: { front: 'q', back: '' } });
-    await db().cards.update(cards[0].id, {
-      buried: true,
-      due: Date.now() - 1000,    // overdue
-    });
+    const yesterdayMs = Date.now() - 36 * 3600 * 1000;
+    await db().cards.update(cards[0].id, { buried: true, buriedAt: yesterdayMs });
     await unburryStaleCards(deck.id);
     const c = await db().cards.get(cards[0].id);
     expect(c?.buried).toBe(false);
   });
 
-  it('unburryStaleCards leaves future-buried cards alone', async () => {
+  it('unburryStaleCards keeps cards buried earlier today', async () => {
     const deck = await createDeck({ name: 'D' });
     const { cards } = await createNote({ deckId: deck.id, fields: { front: 'q', back: '' } });
-    await db().cards.update(cards[0].id, {
-      buried: true,
-      due: Date.now() + 86_400_000,
-    });
+    await db().cards.update(cards[0].id, { buried: true, buriedAt: Date.now() });
     await unburryStaleCards(deck.id);
     const c = await db().cards.get(cards[0].id);
     expect(c?.buried).toBe(true);

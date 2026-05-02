@@ -101,6 +101,13 @@ export interface Card {
 
   suspended: boolean;
   buried: boolean;
+  /**
+   * When the card was last buried (ms epoch). Used by unburryStaleCards to
+   * tell "buried-this-session" from "buried-yesterday-or-earlier". Without
+   * this, the unbury filter has no clock to compare against and ends up
+   * unburying same-session siblings immediately.
+   */
+  buriedAt?: number;
   createdAt: number;
   modifiedAt: number;
 }
