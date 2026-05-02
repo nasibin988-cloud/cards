@@ -1,0 +1,394 @@
+/* KaTeX glyph fonts; required for math rendering output to display correctly.
+   Must come before @tailwind directives — PostCSS requires @import first. */
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Root Variables (mirrors BINESH design tokens) ────────────── */
+:root {
+  --bg-primary: #0d0b12;
+  --bg-secondary: #13111a;
+  --text-primary: #d0ced6;
+  --text-secondary: #837f90;
+  --accent: #a08db8;
+  --accent-light: #c2b5d1;
+  --crimson: #b87d85;
+  --saffron: #bfa272;
+}
+
+html {
+  scroll-behavior: smooth;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+body {
+  font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(145deg, #0d0b12 0%, #110e18 40%, #0f0c14 70%, #0d0b12 100%);
+  background-attachment: fixed;
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 20% 20%, rgba(100, 73, 127, 0.04) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 80%, rgba(140, 58, 71, 0.03) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[dir="rtl"] {
+  font-family: var(--font-vazirmatn), 'IRANSans', Tahoma, Arial, sans-serif;
+}
+
+/* ─── Scrollbar ────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Hidden scrollbar for horizontal-scroll nav strips on mobile. */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Visible-only-on-keyboard focus rings. Keyboard users get a saffron ring on
+   any interactive element they tab to; mouse users see nothing extra. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[role="link"]:focus-visible {
+  outline: 2px solid rgba(253, 230, 138, 0.55);
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgba(253, 230, 138, 0.4);
+  outline-offset: 1px;
+}
+
+/* ─── Glass Morphism ───────────────────────────────────────────── */
+.glass-card {
+  background: rgba(19, 17, 26, 0.55);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.glass-card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.glass-card-hover:hover {
+  transform: translateY(-2px);
+  border-color: rgba(160, 141, 184, 0.18);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* ─── Selection ────────────────────────────────────────────────── */
+::selection {
+  background: rgba(160, 141, 184, 0.25);
+  color: inherit;
+}
+
+/* ─── Focus ────────────────────────────────────────────────────── */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ─── Utility: glassmorphic gradient pill ─────────────────────── */
+/* Glass family — same backdrop-blur + inset-highlight signature as
+   `.glass-card`, plus a low-saturation hue wash (saffron → crimson) so
+   primary actions read as primary without punching out of the chrome.
+   The button sits over the page background with a real diffuse blur,
+   so it visually "floats" rather than just being a tinted rectangle.
+   Hover deepens the wash and adds a soft accent glow. */
+.btn-gradient {
+  background:
+    linear-gradient(135deg,
+      rgba(120, 95, 54, 0.32) 0%,
+      rgba(97, 39, 51, 0.32) 100%),
+    rgba(19, 17, 26, 0.45);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  color: rgba(240, 237, 242, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 4px 14px rgba(0, 0, 0, 0.22);
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+.btn-gradient:hover {
+  background:
+    linear-gradient(135deg,
+      rgba(120, 95, 54, 0.55) 0%,
+      rgba(97, 39, 51, 0.55) 100%),
+    rgba(19, 17, 26, 0.55);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(240, 237, 242, 1);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 6px 20px rgba(0, 0, 0, 0.28),
+    0 0 24px rgba(160, 141, 184, 0.10);
+}
+.btn-gradient:active {
+  transform: translateY(0);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.2),
+    0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.btn-gradient:disabled {
+  filter: grayscale(0.4) brightness(0.65);
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ─── Cloze blank rendering ───────────────────────────────────── */
+.cloze-blank {
+  display: inline-block;
+  min-width: 3.25rem;
+  padding: 0.05em 0.55em;
+  margin: 0 0.05em;
+  background: linear-gradient(180deg,
+    rgba(160, 141, 184, 0.06) 0%,
+    rgba(160, 141, 184, 0.14) 100%);
+  border: 1px solid rgba(160, 141, 184, 0.16);
+  border-radius: 0.5rem;
+  color: rgba(160, 141, 184, 0.55);
+  font-style: italic;
+  letter-spacing: 0.15em;
+  font-weight: 300;
+  vertical-align: baseline;
+  line-height: 1.3;
+}
+
+.cloze-revealed {
+  color: #fde68a;
+  background: rgba(191, 162, 114, 0.14);
+  padding: 0 0.3rem;
+  border-radius: 0.25rem;
+  font-weight: 500;
+}
+
+.cloze-other-revealed {
+  color: var(--text-primary);
+  opacity: 0.95;
+}
+
+/* ─── Type-the-answer cloze ───────────────────────────────────── */
+input.type-cloze {
+  display: inline-block;
+  min-width: 6rem;
+  width: auto;
+  padding: 0.1em 0.6em;
+  margin: 0 0.05em;
+  background: linear-gradient(180deg,
+    rgba(160, 141, 184, 0.06) 0%,
+    rgba(160, 141, 184, 0.14) 100%);
+  border: 1px solid rgba(160, 141, 184, 0.20);
+  border-radius: 0.5rem;
+  color: #fde68a;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.3;
+  outline: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+input.type-cloze::placeholder {
+  color: rgba(160, 141, 184, 0.45);
+  font-style: italic;
+}
+input.type-cloze:focus {
+  border-color: rgba(253, 230, 138, 0.5);
+  background: rgba(253, 230, 138, 0.08);
+}
+
+.type-cloze-result {
+  display: inline-block;
+  padding: 0 0.1em;
+}
+.type-cloze-match {
+  color: #c8e6c9;
+  background: rgba(115, 175, 96, 0.18);
+  padding: 0 0.05em;
+  border-radius: 0.2rem;
+}
+.type-cloze-miss {
+  color: #fecaca;
+  background: rgba(220, 90, 90, 0.20);
+  padding: 0 0.05em;
+  border-radius: 0.2rem;
+  text-decoration: line-through;
+  text-decoration-color: rgba(220, 90, 90, 0.55);
+}
+.type-cloze-correct {
+  color: #fde68a;
+  background: rgba(191, 162, 114, 0.18);
+  padding: 0 0.3rem;
+  border-radius: 0.3rem;
+  font-weight: 500;
+}
+.type-cloze-empty {
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+}
+.type-cloze-expected {
+  color: #fde68a;
+  font-weight: 500;
+}
+.type-cloze-arrow {
+  color: rgba(255, 255, 255, 0.35);
+  margin: 0 0.25em;
+}
+
+/* ─── Cross-card links [[query]] ─────────────────────────────── */
+.card-xlink {
+  color: rgba(160, 200, 230, 0.85);
+  border-bottom: 1px dotted rgba(160, 200, 230, 0.35);
+  padding: 0 0.05em;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.card-xlink::before {
+  content: '↪';
+  margin-right: 0.2em;
+  font-size: 0.75em;
+  opacity: 0.55;
+  vertical-align: 0.05em;
+}
+.card-xlink:hover {
+  color: rgba(190, 220, 245, 1);
+  background: rgba(160, 200, 230, 0.07);
+  border-bottom-color: rgba(160, 200, 230, 0.6);
+  border-radius: 0.2em;
+}
+.card-xlink-unresolved {
+  color: rgba(184, 125, 133, 0.7);
+  border-bottom-color: rgba(184, 125, 133, 0.4);
+  text-decoration: line-through;
+  text-decoration-color: rgba(184, 125, 133, 0.4);
+}
+.card-xlink-ambiguous {
+  /* Saffron underline tells the reader "this resolves but to multiple
+     candidates — click to pick which one." Distinct from broken (crimson). */
+  color: rgba(191, 162, 114, 0.85);
+  border-bottom: 1px dashed rgba(191, 162, 114, 0.6);
+}
+
+/* ─── Card prose (renders inside CardRenderer) ────────────────── */
+.card-prose {
+  color: var(--text-primary);
+  line-height: 1.6;
+  font-weight: 300;
+}
+/* Markdown wraps prose in <p>; reset margins so spacing is controlled by
+   the card layout, not paragraph defaults. */
+.card-prose > div > p:first-child,
+.card-prose p:only-child { margin: 0; }
+.card-prose p { margin: 0 0 0.6em 0; }
+.card-prose p:last-child { margin-bottom: 0; }
+.card-prose ul, .card-prose ol { margin: 0.4em 0 0.6em 1.2em; padding: 0; }
+.card-prose ul { list-style: disc outside; }
+.card-prose ol { list-style: decimal outside; }
+.card-prose li { margin-bottom: 0.2em; }
+.card-prose h1, .card-prose h2, .card-prose h3, .card-prose h4 {
+  font-weight: 500;
+  color: #c2b5d1;
+  margin: 0.6em 0 0.3em 0;
+}
+.card-prose h1 { font-size: 1.15em; }
+.card-prose h2 { font-size: 1.08em; }
+.card-prose h3 { font-size: 1em; }
+.card-prose h4 { font-size: 0.95em; }
+.card-prose blockquote {
+  border-left: 3px solid rgba(191, 162, 114, 0.5);
+  padding-left: 0.75em;
+  margin: 0.4em 0;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.card-prose hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 0.6em 0;
+}
+.card-prose strong { color: #c2b5d1; font-weight: 600; }
+.card-prose em { color: #bfa272; font-style: italic; }
+.card-prose code {
+  font-family: var(--font-mono), 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.3em;
+  background: rgba(160, 141, 184, 0.12);
+  border-radius: 4px;
+}
+.card-prose pre {
+  font-family: var(--font-mono), 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  padding: 0.8em;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 0.4em 0;
+}
+.card-prose pre code { background: none; padding: 0; }
+.card-prose table {
+  border-collapse: collapse;
+  margin: 0.4em 0;
+  font-size: 0.9em;
+}
+.card-prose th, .card-prose td {
+  padding: 0.35em 0.6em;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.card-prose th { background: rgba(160, 141, 184, 0.06); font-weight: 500; }
+.card-prose img { max-width: 100%; border-radius: 0.5rem; margin: 0.4em 0; }
+.card-prose a { color: #bfa272; text-decoration: underline; text-decoration-thickness: 1px; }
+
+/* Back-side blocks: tight label/body alignment. Left-aligned for consistent
+   word spacing — justified at this column width produced visible word-gap
+   rivers in dense paragraphs, so we trade the even right edge for cleaner
+   typography. */
+.back-prose > p:first-child { margin-top: 0; }
+.back-prose > p:last-child { margin-bottom: 0; }
+.back-prose p { margin: 0 0 0.5em 0; }
+.back-prose ul, .back-prose ol { margin: 0.3em 0 0.5em 1.2em; }
+.back-prose li { margin-bottom: 0.15em; }
+
+/* ─── Animations ──────────────────────────────────────────────── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.loading-shimmer {
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.08) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ─── Heatmap cells (used in stats) ───────────────────────────── */
+.heat-0 { background: rgba(255, 255, 255, 0.04); }
+.heat-1 { background: rgba(143, 114, 64, 0.20); }
+.heat-2 { background: rgba(143, 114, 64, 0.40); }
+.heat-3 { background: rgba(168, 135, 79, 0.60); }
+.heat-4 { background: rgba(212, 192, 156, 0.85); }

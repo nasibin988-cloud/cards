@@ -1,0 +1,29 @@
+# Cards on the Hetzner VPS.
+#
+# Joins the existing rebuilding-iran Caddy network (`app_web`, created by
+# /opt/app/docker-compose.yml when the RI stack starts) so Caddy can
+# reverse-proxy `rebuilding-iran.com/cards*` to this container.
+
+services:
+  cards:
+    build:
+      context: .
+      args:
+        BASE_PATH: /cards
+    image: cards:latest
+    container_name: cards
+    restart: unless-stopped
+    # No public port mapping — Caddy reaches it via the shared network.
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      NEXT_PUBLIC_BASE_PATH: /cards
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: app_web

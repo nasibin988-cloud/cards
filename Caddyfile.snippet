@@ -1,0 +1,27 @@
+# Caddy block to ADD to /opt/app/Caddyfile on the Hetzner VPS.
+#
+# Place INSIDE the existing `{$DOMAIN:localhost} { … }` block, BEFORE the
+# existing `reverse_proxy app:3000 { … }` (which catches `/`). Caddy
+# matches `handle` directives in source order; the `/cards*` matcher must
+# be first so it wins over the catch-all.
+
+# --- snip ---
+
+# Match `/cards`, `/cards/`, and `/cards/anything` and forward with the
+# path INTACT to the cards container (named `cards`, port 3000) over the
+# shared `app_web` network. The Next.js server is built with
+# basePath=/cards so it already expects requests under that prefix — we
+# don't strip. `handle` (vs `handle_path`) preserves the URL path.
+handle /cards* {
+    reverse_proxy cards:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# --- /snip ---
+
+# Reload Caddy after editing:
+#   cd /opt/app && docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile

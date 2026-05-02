@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.github
+test-results
+playwright-report
+tests
+*.log
+.DS_Store
+.env*.local
+docs
