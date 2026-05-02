@@ -25,11 +25,11 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 # 2. Push to remote so the box can pull.
-echo "[deploy] pushing to origin…"
+echo "[deploy] pushing to origin..."
 git push origin "$(git rev-parse --abbrev-ref HEAD)"
 
 # 3. Pull, build, and bring up the container on the Hetzner box.
-echo "[deploy] building + starting on $HOST…"
+echo "[deploy] building + starting on ${HOST}..."
 ssh "$HOST" "set -e; \
   cd '$REMOTE_DIR'; \
   git pull --ff-only; \
@@ -39,12 +39,12 @@ ssh "$HOST" "set -e; \
 # 4. Reload Caddy so any new routes pick up. Idempotent — safe to skip if
 #    you haven't touched the Caddyfile.
 if [ -n "$CADDY_RELOAD" ]; then
-  echo "[deploy] reloading Caddy…"
+  echo "[deploy] reloading Caddy..."
   ssh "$HOST" "$CADDY_RELOAD"
 fi
 
 # 5. Smoke test.
-echo "[deploy] verifying https://rebuilding-iran.com/cards/ …"
+echo "[deploy] verifying https://rebuilding-iran.com/cards/ ..."
 http_code="$(curl -s -o /dev/null -w '%{http_code}' https://rebuilding-iran.com/cards/ || true)"
 if [ "$http_code" = "200" ]; then
   echo "[deploy] OK — https://rebuilding-iran.com/cards/ responding 200."
