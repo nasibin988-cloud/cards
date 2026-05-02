@@ -3,6 +3,14 @@
 # Joins the existing rebuilding-iran Caddy network (`app_web`, created by
 # /opt/app/docker-compose.yml when the RI stack starts) so Caddy can
 # reverse-proxy `rebuilding-iran.com/cards*` to this container.
+#
+# Self-hosted sync:
+#   - The /api/sync/snapshot route reads/writes a single JSON file from
+#     /data inside the container.
+#   - On the host, /opt/cards/data is bind-mounted there so the snapshot
+#     survives container rebuilds.
+#   - CARDS_SYNC_TOKEN is the bearer token clients must send. Set it in
+#     a sibling .env file (see .env.example) so it stays out of git.
 
 services:
   cards:
@@ -20,6 +28,10 @@ services:
       NODE_ENV: production
       PORT: "3000"
       NEXT_PUBLIC_BASE_PATH: /cards
+      CARDS_SYNC_TOKEN: ${CARDS_SYNC_TOKEN:-}
+      CARDS_SYNC_DATA_DIR: /data
+    volumes:
+      - /opt/cards/data:/data
     networks:
       - web
 

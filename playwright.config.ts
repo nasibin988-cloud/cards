@@ -31,5 +31,12 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     stdout: 'pipe',
     stderr: 'pipe',
+    env: {
+      // Wire up self-hosted sync for the API smoke tests in 18-…spec.ts.
+      // Token must match the literal in the spec; data dir is a tmp path
+      // so test runs don't pollute a real /data mount.
+      CARDS_SYNC_TOKEN: 'test-bearer-token-deadbeef',
+      CARDS_SYNC_DATA_DIR: '/tmp/cards-sync-test-data',
+    },
   },
 });

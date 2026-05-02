@@ -13,6 +13,7 @@ import type {
   Setting,
   Source,
 } from './schema';
+import { markDirty } from '@/lib/sync/dirty';
 
 /**
  * Inverted-index posting: one row per (token, noteId) pair. Lets us run
@@ -76,6 +77,25 @@ export class CardsDB extends Dexie {
     this.version(6).stores({
       feynmanLogs: 'id, cardId, noteId, deckId, createdAt, [cardId+createdAt]',
     });
+
+    // Auto-sync dirty hooks. Any create/update/delete on user-data tables
+    // fires `cards:dirty` so the auto-sync layer can debounce a push. We
+    // intentionally skip `settings` (would loop on the sync_meta write
+    // that push() itself does) and `media` / `searchTokens` (derived,
+    // unsuitable for snapshot-replace sync). Hooks fire synchronously
+    // before the operation lands; false positives (writes that later
+    // fail) are harmless — the next status check just confirms in-sync.
+    const dirtyTables: Array<keyof CardsDB> = [
+      'cards', 'notes', 'decks', 'reviewLogs', 'exams', 'examQuestions',
+      'practiceQueries', 'sources', 'highlights', 'feynmanLogs',
+    ];
+    for (const t of dirtyTables) {
+      const tbl = (this as unknown as Record<string, Table>)[t as string];
+      if (!tbl) continue;
+      tbl.hook('creating', () => { markDirty(); });
+      tbl.hook('updating', () => { markDirty(); });
+      tbl.hook('deleting', () => { markDirty(); });
+    }
   }
 }
 

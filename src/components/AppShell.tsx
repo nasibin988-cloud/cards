@@ -9,6 +9,8 @@ import KeyboardHelp from '@/components/study/KeyboardHelp';
 import QuickCapture from '@/components/QuickCapture';
 import { TooltipProvider } from '@/components/ui/Tooltip';
 import { fireDailyIfDue } from '@/lib/notifications/daily';
+import { useAutoSync } from '@/lib/sync/useAutoSync';
+import SyncStatusBadge from '@/components/sync/SyncStatusBadge';
 
 interface NavItem {
   href: string;
@@ -32,6 +34,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isStudying = pathname?.startsWith('/study/') ?? false;
   const [helpOpen, setHelpOpen] = useState(false);
+  // Mounted once globally — pulls on app open if behind, debounce-pushes
+  // after writes, and flushes on tab hide.
+  const autoSyncState = useAutoSync();
 
   // Best-effort daily notification on app open. The helper is no-op when the
   // feature is disabled, permission isn't granted, or we fired recently.
@@ -87,6 +92,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               </div>
             </nav>
             <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
+              <SyncStatusBadge state={autoSyncState} />
               <Link
                 href="/occlusion/new"
                 className="hidden sm:inline-flex px-3 py-1.5 rounded-lg text-sm text-dark-300 hover:text-dark-100 hover:bg-white/[0.04] transition"

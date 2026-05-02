@@ -109,6 +109,68 @@ export class SupabaseAdapter implements SyncAdapter {
   }
 }
 
+/* ─── Self-hosted adapter (Hetzner / any HTTPS endpoint) ────── */
+
+export interface SelfHostedConfig {
+  /**
+   * Full URL to the sync endpoint, e.g.
+   * `https://rebuilding-iran.com/cards/api/sync/snapshot`.
+   * Must point at the route that implements GET (pull) + PUT (push).
+   */
+  url: string;
+  /** Bearer token; matched against CARDS_SYNC_TOKEN on the server. */
+  token: string;
+}
+
+export class SelfHostedAdapter implements SyncAdapter {
+  private url: string;
+  private token: string;
+
+  constructor(cfg: SelfHostedConfig) {
+    this.url = cfg.url;
+    this.token = cfg.token;
+  }
+
+  async push(blob: EncryptedBlob, version: number): Promise<{ remoteVersion: number }> {
+    const r = await fetch(this.url, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ blob, version }),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`push failed (${r.status}): ${text || r.statusText}`);
+    }
+    const data = (await r.json()) as { remoteVersion: number };
+    return { remoteVersion: data.remoteVersion };
+  }
+
+  async pull(): Promise<RemoteSnapshot | null> {
+    const r = await fetch(this.url, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+    if (r.status === 204) return null;
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`pull failed (${r.status}): ${text || r.statusText}`);
+    }
+    const data = (await r.json()) as {
+      blob: EncryptedBlob;
+      version: number;
+      updatedAt: string;
+    };
+    return {
+      blob: data.blob,
+      remoteVersion: data.version,
+      updatedAt: new Date(data.updatedAt).getTime(),
+    };
+  }
+}
+
 /* ─── Loopback adapter (testing) ─────────────────────────────── */
 
 const LOOPBACK_KEY = 'cards-sync-loopback';

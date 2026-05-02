@@ -72,6 +72,33 @@ export CARDS_CADDY_RELOAD="docker compose -f /opt/rebuilding-iran/docker-compose
 
 `source` your rc file or open a new shell.
 
+### 5. One-time sync server setup
+
+Cards ships a self-hosted sync endpoint at `/api/sync/snapshot`. The
+container reads/writes a single JSON file from `/data` (bind-mounted
+from `/opt/cards/data` on the host). One-time setup on the Hetzner box:
+
+```bash
+# Storage dir + a strong bearer token in the env file next to compose.
+ssh root@89.167.33.158 '
+  mkdir -p /opt/cards/data &&
+  cd /opt/cards &&
+  printf "CARDS_SYNC_TOKEN=%s\n" "$(openssl rand -hex 32)" > .env &&
+  chmod 600 .env &&
+  cat .env
+'
+```
+
+The printed token is what you paste into **Settings → Sync (cloud) →
+Bearer token** on every device. Keep it safe; anyone with this token can
+read or overwrite the (still ciphertext) snapshot.
+
+Then re-up the container so it picks up the new mount + env:
+
+```bash
+ssh root@89.167.33.158 'cd /opt/cards && docker compose up -d cards'
+```
+
 ## Day-to-day deploy
 
 From the cards app directory:
