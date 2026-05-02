@@ -177,9 +177,14 @@ export default function SyncPanel() {
     if (!confirm('Pull will OVERWRITE local data. Continue?')) return;
     setBusy('pull'); setError(null); setInfo(null);
     try {
-      const s = await pull(adapter, passphrase);
-      setStatus_(s);
-      setInfo('Pulled.');
+      await pull(adapter, passphrase);
+      // Page reload after pull is the simplest way to make every
+      // data-fetching component (DeckList, TodayBar, Reviewer, …)
+      // re-read from the just-replaced IndexedDB. Without this, anything
+      // that mounted before the pull keeps its pre-pull React state and
+      // looks empty even though the DB has the pulled data.
+      setInfo('Pulled. Reloading…');
+      setTimeout(() => window.location.reload(), 250);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

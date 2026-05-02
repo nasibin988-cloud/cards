@@ -154,8 +154,18 @@ export function useAutoSync(): AutoSyncState {
         if (cancelled) return;
         if (s.state === 'behind') {
           setState({ kind: 'syncing', phase: 'pull' });
-          const after = await pull(adapter, passphrase);
-          if (!cancelled) setState({ kind: 'idle', lastStatus: after, lastError: null });
+          await pull(adapter, passphrase);
+          // Force a reload so every data-fetching component re-reads
+          // from the just-replaced IndexedDB. Without this the user sees
+          // empty deck/notes/etc until they manually refresh — even
+          // though the DB has the pulled data. Auto-pull only fires on
+          // app open so a reload here is acceptable (no in-flight work
+          // gets dropped).
+          if (!cancelled) {
+            setState({ kind: 'syncing', phase: 'pull' });
+            setTimeout(() => window.location.reload(), 250);
+          }
+          return;
         } else if (s.state === 'untouched') {
           // Seed the server with our baseline so future devices have
           // something to pull. Safe — there's nothing to overwrite.
