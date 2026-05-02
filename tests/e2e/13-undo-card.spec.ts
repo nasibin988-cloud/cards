@@ -75,4 +75,60 @@ test.describe('Undo last review (Cmd+Z)', () => {
     // Flash text — keep loose since the message wording could shift.
     await expect(page.getByText(/Nothing to undo/i)).toBeVisible({ timeout: 3000 });
   });
+
+  test('Cmd+Z walks all the way back through multiple rated cards', async ({ page }) => {
+    await wipe(page);
+    const deckId = await createDeck(page, 'UndoMultiE2E');
+    await addBasicNote(page, deckId, 'card-A', 'a');
+    await addBasicNote(page, deckId, 'card-B', 'b');
+    await addBasicNote(page, deckId, 'card-C', 'c');
+    await addBasicNote(page, deckId, 'card-D', 'd');
+
+    await page.goto(`/study/${deckId}`);
+
+    // Rate three cards in a row (A, B, C). The fourth (D) is what's on screen
+    // after the third rate.
+    for (const expectedFront of ['card-A', 'card-B', 'card-C']) {
+      await expect(page.getByText(expectedFront).first()).toBeVisible({ timeout: 4000 });
+      await page.keyboard.press('Space');
+      await expect(page.getByRole('button', { name: /Good/i })).toBeVisible();
+      await page.keyboard.press('3');
+    }
+    await expect(page.getByText('card-D').first()).toBeVisible({ timeout: 4000 });
+
+    // Three undos walk back through C → B → A in reverse order.
+    await page.keyboard.press('Meta+z');
+    await expect(page.getByText('card-C').first()).toBeVisible({ timeout: 4000 });
+    await page.keyboard.press('Meta+z');
+    await expect(page.getByText('card-B').first()).toBeVisible({ timeout: 4000 });
+    await page.keyboard.press('Meta+z');
+    await expect(page.getByText('card-A').first()).toBeVisible({ timeout: 4000 });
+
+    // One more undo: stack is empty AND no review logs older than card-A
+    // (it was the very first rate). Should flash "Nothing to undo".
+    await page.keyboard.press('Meta+z');
+    await expect(page.getByText(/Nothing to undo/i)).toBeVisible({ timeout: 3000 });
+  });
+
+  test('Cmd+Z still undoes after a page reload (cross-session)', async ({ page }) => {
+    await wipe(page);
+    const deckId = await createDeck(page, 'UndoCrossSessionE2E');
+    await addBasicNote(page, deckId, 'cs-A', 'a');
+    await addBasicNote(page, deckId, 'cs-B', 'b');
+
+    await page.goto(`/study/${deckId}`);
+    await expect(page.getByText('cs-A').first()).toBeVisible();
+    await page.keyboard.press('Space');
+    await expect(page.getByRole('button', { name: /Good/i })).toBeVisible();
+    await page.keyboard.press('3');
+    await expect(page.getByText('cs-B').first()).toBeVisible({ timeout: 4000 });
+
+    // Reload — in-memory undo stack is now empty.
+    await page.reload();
+    await expect(page.getByText(/cs-[AB]/).first()).toBeVisible({ timeout: 6000 });
+
+    // Cmd+Z should still rewind to cs-A by walking the persisted review log.
+    await page.keyboard.press('Meta+z');
+    await expect(page.getByText('cs-A').first()).toBeVisible({ timeout: 4000 });
+  });
 });

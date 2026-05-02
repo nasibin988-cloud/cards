@@ -1475,6 +1475,36 @@ export async function listReviewsForCard(cardId: string): Promise<ReviewLog[]> {
   return logs.sort((a, b) => b.review - a.review);
 }
 
+/**
+ * Fetch the most recent review logs across the given decks that still have
+ * a pre-review snapshot in settings (i.e. are still rollback-able). Used
+ * by the Reviewer's undo to walk back through history after a reload, when
+ * the in-memory stack is empty. Returns up to `limit` logs newest-first.
+ */
+export async function listRecentUndoableReviews(
+  deckIds: string[],
+  limit = 50,
+): Promise<ReviewLog[]> {
+  if (deckIds.length === 0) return [];
+  const dbi = db();
+  const ids = new Set(deckIds);
+  // Pull the newest logs in scope. Dexie's reverse() walks the index from
+  // the back; combined with limit() this avoids loading the full table.
+  const logs = await dbi.reviewLogs
+    .orderBy('review')
+    .reverse()
+    .filter(l => ids.has(l.deckId))
+    .limit(limit)
+    .toArray();
+  if (logs.length === 0) return logs;
+  // Filter to logs that still have an undo snapshot (older reviews may
+  // have had their snapshot rolled back already).
+  const snapKeys = logs.map(l => `__preReview:${l.id}`);
+  const snaps = await dbi.settings.where('key').anyOf(snapKeys).primaryKeys();
+  const haveSnap = new Set(snaps as string[]);
+  return logs.filter(l => haveSnap.has(`__preReview:${l.id}`));
+}
+
 const FLAG_CYCLE: ReadonlyArray<NoteFlag | undefined> = [
   undefined, 'revisit', 'broken', 'exemplar', 'errata',
 ];

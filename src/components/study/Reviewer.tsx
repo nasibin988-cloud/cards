@@ -17,6 +17,7 @@ import {
   getScopeCapStatus,
   getTodayStudyStats,
   listDescendantDeckIds,
+  listRecentUndoableReviews,
   peekNextCardForStudy,
   recordReview,
   restoreCardDue,
@@ -97,13 +98,14 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     rate: number;
   }>({ enabled: false, autoFront: false, autoBack: false, voiceURI: '', rate: 1 });
   const [ttsActive, setTtsActive] = useState(false);
-  // The last action eligible for Undo. Reviews and snoozes both write here;
-  // the discriminator drives how `undo` reverses the change.
-  const lastRef = useRef<
+  // Undo stack. Every rate or snooze pushes onto it; Cmd+Z / U pops one off
+  // and reverses it. When the stack is empty (e.g. a fresh session after a
+  // reload) the undo handler falls back to walking the persisted review-log
+  // history so the user can keep undoing past actions.
+  type UndoEntry =
     | { kind: 'review'; cardId: string; logId: string }
-    | { kind: 'snooze'; cardId: string; previousDue: number }
-    | null
-  >(null);
+    | { kind: 'snooze'; cardId: string; previousDue: number };
+  const historyRef = useRef<UndoEntry[]>([]);
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
@@ -404,7 +406,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       const dur = Date.now() - shownAt;
       const opts = await effectiveOptsFor(card.deckId);
       const { log } = await recordReview(card, rating, dur, opts);
-      lastRef.current = { kind: 'review', cardId: card.id, logId: log.id };
+      historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
       setSessionReviewed(n => n + 1);
       try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
       fetchNext();
@@ -423,7 +425,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     if (!card) return;
     const r = await snoozeCard(card.id, delayMs);
     if (r) {
-      lastRef.current = { kind: 'snooze', cardId: card.id, previousDue: r.previousDue };
+      historyRef.current.push({ kind: 'snooze', cardId: card.id, previousDue: r.previousDue });
       showFlash(`Snoozed ${label}.`);
     }
     fetchNext();
@@ -457,18 +459,34 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   }, [note, card, hintLoading]);
 
   const undo = useCallback(async () => {
-    const last = lastRef.current;
+    // Try the in-memory stack first (most recent action this session).
+    let last: UndoEntry | undefined = historyRef.current.pop();
+
+    // If the stack is empty, fall back to the persisted review log so the
+    // user can keep undoing across reloads. Snoozes can't be recovered this
+    // way (no log row), but reviews can — the snapshot is still in settings.
+    if (!last) {
+      try {
+        const studyDeckIds = await resolveStudyDeckIds();
+        const recent = await listRecentUndoableReviews(studyDeckIds, 1);
+        if (recent.length > 0) {
+          const log = recent[0];
+          last = { kind: 'review', cardId: log.cardId, logId: log.id };
+        }
+      } catch { /* fall through to "nothing to undo" */ }
+    }
+
     if (!last) {
       showFlash('Nothing to undo.');
       return;
     }
+
     if (last.kind === 'review') {
       await rollbackReview(last.cardId, last.logId);
     } else {
       await restoreCardDue(last.cardId, last.previousDue);
     }
     const restoredCardId = last.cardId;
-    lastRef.current = null;
 
     // Take the user back to the card they just acted on, in front-phase.
     // The picker would pick *some* card next based on priority, but for
@@ -506,7 +524,8 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     const newCounts = await getDeckCounts(studyDeckIds);
     setCounts(newCounts);
     getScopeCapStatus(studyDeckIds).then(setCapStatus).catch(() => { /* silent */ });
-    showFlash('Undone.');
+    const remaining = historyRef.current.length;
+    showFlash(remaining > 0 ? `Undone. ${remaining} more.` : 'Undone.');
   }, [fetchNext, effectiveOptsFor, resolveStudyDeckIds]);
 
   function showFlash(msg: string) {
@@ -899,7 +918,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   ...opts,
                   intervalMultiplier: multiplier,
                 });
-                lastRef.current = { kind: 'review', cardId: card.id, logId: log.id };
+                historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
                 setSessionReviewed(n => n + 1);
                 try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
                 setFeynmanOpen(false);
