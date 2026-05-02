@@ -20,10 +20,10 @@ const GLOBAL_ROWS: Row[] = [
 ];
 
 const STUDY_ROWS: Row[] = [
-  { keys: ['Space', 'Enter', 'click'], description: 'Reveal answer' },
-  { keys: ['1', 'J'], description: 'Again' },
+  { keys: ['Space', 'Enter', ',', '.', 'click'], description: 'Reveal answer (when on front)' },
+  { keys: ['1', 'J', ','], description: 'Again' },
   { keys: ['2', 'K'], description: 'Hard' },
-  { keys: ['3', 'L'], description: 'Good' },
+  { keys: ['3', 'L', '.'], description: 'Good' },
   { keys: ['4', ';'], description: 'Easy' },
   { keys: ['N'], description: 'Snooze 1 hour ("not now")' },
   { keys: ['M'], description: 'Snooze 1 day ("mañana")' },
