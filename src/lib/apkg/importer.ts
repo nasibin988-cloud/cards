@@ -139,6 +139,14 @@ export async function importApkg(
       ankiNotes.push({ id: String(id), mid: String(mid), tags, flds });
     }
   }
+  // Anki's note.id is the creation timestamp (ms since epoch) and increases
+  // monotonically with authoring order. Sort by it so we can hand each note
+  // a sequential index → preserves the deck's authoring order in our
+  // createdAt-based picker. Use BigInt because ids overflow JS Number safe-int.
+  ankiNotes.sort((a, b) => {
+    const av = BigInt(a.id), bv = BigInt(b.id);
+    return av < bv ? -1 : av > bv ? 1 : 0;
+  });
 
   // Read cards
   const cardsRes = sqlite.exec('SELECT id, nid, did, ord FROM cards');
@@ -164,6 +172,12 @@ export async function importApkg(
     bucket.push(c);
   }
 
+  // Width of one note's "slot" in createdAt-space. 1000 leaves room for
+  // sibling cards (cloze ords) without colliding with the next note's slot.
+  // No real Anki note has 1000 cards.
+  const SLOT = 1000;
+  let noteIndex = 0;
+
   for (const an of ankiNotes) {
     const model = modelMap.get(an.mid);
     if (!model) continue;
@@ -179,14 +193,18 @@ export async function importApkg(
     const fieldValues = an.flds.split(FIELD_SEPARATOR);
     const mapped = mapFields(model, fieldValues);
 
+    // Sequential createdAt — preserves authoring order. Cards of this note
+    // get adjacent slots so siblings stay together when sorted.
+    const noteCreatedAt = t + noteIndex * SLOT;
+
     const note: Note = {
       id: ulid(),
       deckId: deck.id,
       modelId: model.type === 1 ? 'cloze' : 'basic',
       fields: mapped,
       tags: (an.tags ?? '').split(/\s+/).map(s => s.trim()).filter(Boolean),
-      createdAt: t,
-      modifiedAt: t,
+      createdAt: noteCreatedAt,
+      modifiedAt: noteCreatedAt,
     };
     notesByAnkiId.set(an.id, note);
 
@@ -199,11 +217,12 @@ export async function importApkg(
         ...empty,
         suspended: false,
         buried: false,
-        createdAt: t,
-        modifiedAt: t,
+        createdAt: noteCreatedAt + ac.ord,
+        modifiedAt: noteCreatedAt + ac.ord,
       });
     }
 
+    noteIndex++;
     if (notesByAnkiId.size % 200 === 0) {
       onProgress({
         phase: 'parsing',
