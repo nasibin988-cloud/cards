@@ -165,9 +165,9 @@ export default function SyncPanel() {
       const s = await push(adapter, passphrase);
       setStatus_(s);
       setInfo('Pushed.');
+      setBusy(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(null);
     }
   };
@@ -182,12 +182,14 @@ export default function SyncPanel() {
       // data-fetching component (DeckList, TodayBar, Reviewer, …)
       // re-read from the just-replaced IndexedDB. Without this, anything
       // that mounted before the pull keeps its pre-pull React state and
-      // looks empty even though the DB has the pulled data.
+      // looks empty even though the DB has the pulled data. Keep
+      // `busy='pull'` so the button stays visibly active until the
+      // reload destroys the state — clearing it here flashes the button
+      // back to "Pull now" for a frame, which reads as unresponsive.
       setInfo('Pulled. Reloading…');
-      setTimeout(() => window.location.reload(), 250);
+      setTimeout(() => window.location.reload(), 400);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(null);
     }
   };
@@ -398,15 +400,17 @@ export default function SyncPanel() {
             <button
               onClick={doPush}
               disabled={busy !== null || !passphrase}
-              className="btn-gradient px-4 py-2 rounded-xl text-sm"
+              className="btn-gradient px-4 py-2 rounded-xl text-sm inline-flex items-center gap-2"
             >
+              {busy === 'push' && <Spinner />}
               {busy === 'push' ? 'Pushing…' : 'Push now'}
             </button>
             <button
               onClick={doPull}
               disabled={busy !== null || !passphrase || !status_?.remoteVersion}
-              className="btn-gradient px-4 py-2 rounded-xl text-sm"
+              className="btn-gradient px-4 py-2 rounded-xl text-sm inline-flex items-center gap-2"
             >
+              {busy === 'pull' && <Spinner />}
               {busy === 'pull' ? 'Pulling…' : 'Pull now'}
             </button>
           </div>
@@ -421,6 +425,30 @@ export default function SyncPanel() {
 
 const inputClass =
   'w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 placeholder:text-dark-500 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] focus:border-persian-500/30';
+
+function Spinner() {
+  // 14×14 SVG ring; CSS animation rotates it. Inline so no asset round-trip,
+  // and so the stroke color tracks the parent button's `currentColor`.
+  return (
+    <svg
+      className="animate-spin"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+      <path
+        d="M22 12a10 10 0 0 1-10 10"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
