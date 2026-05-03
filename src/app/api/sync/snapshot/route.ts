@@ -85,7 +85,7 @@ export async function PUT(req: Request) {
   if (!authOk(req)) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
-  let body: { blob?: unknown; version?: unknown };
+  let body: { blob?: unknown; version?: unknown; salt?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -94,11 +94,17 @@ export async function PUT(req: Request) {
   if (!body || typeof body !== 'object' || !body.blob || typeof body.version !== 'number') {
     return NextResponse.json({ error: 'invalid_payload' }, { status: 400 });
   }
-  const payload = {
+  const payload: {
+    blob: unknown;
+    version: number;
+    updatedAt: string;
+    salt?: string;
+  } = {
     blob: body.blob,
     version: body.version,
     updatedAt: new Date().toISOString(),
   };
+  if (typeof body.salt === 'string') payload.salt = body.salt;
   try {
     await writeSnapshot(payload);
     return NextResponse.json({ remoteVersion: payload.version, updatedAt: payload.updatedAt });

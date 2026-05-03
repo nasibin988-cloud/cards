@@ -3,14 +3,18 @@
  *
  * Design:
  *   - User sets a sync passphrase. We derive a 256-bit AES-GCM key with
- *     PBKDF2(SHA-256, 200_000 iterations, per-device salt persisted in IDB).
- *   - On push: serialize snapshot, encrypt, upload ciphertext + iv to Supabase.
- *     The server stores `bytea` blobs; never sees plaintext or the passphrase.
- *   - On pull: download ciphertext, decrypt with the same passphrase.
+ *     PBKDF2(SHA-256, 200_000 iterations, per-snapshot salt).
+ *   - On push: serialize snapshot, encrypt, upload ciphertext + iv + the
+ *     salt that produced this key. The server stores opaque ciphertext +
+ *     the (non-secret) salt; never sees plaintext or the passphrase.
+ *   - On pull: download ciphertext + salt, derive the same key from the
+ *     user's passphrase + that salt, decrypt.
  *
- * The salt is per-device on purpose — losing the device means re-deriving the
- * key on the next device with a fresh salt. The passphrase itself is what
- * matters; rotating salt is a layered defense, not the load-bearing secret.
+ * Salt has to travel with the snapshot, NOT live per-device — that was a
+ * bug in v1 of this module that made cross-device decrypt fail with
+ * "wrong passphrase" even when the passphrase was correct. Salt isn't
+ * secret; its job is to defeat rainbow tables, which it still does at
+ * 200K PBKDF2 iterations regardless of who knows the salt.
  */
 
 import { getSetting, setSetting } from '@/lib/db/queries';
@@ -20,7 +24,13 @@ const KEY_LEN = 256;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 
-async function getOrCreateSalt(): Promise<Uint8Array> {
+/**
+ * Read the locally-cached salt; create one if this device has never
+ * encrypted before. The cached salt is what we'll attach to the next
+ * push. Pulls overwrite this with whatever salt rode along with the
+ * remote snapshot, so all devices converge on the same value.
+ */
+export async function getOrCreateLocalSalt(): Promise<Uint8Array> {
   const existing = await getSetting('sync_salt_b64');
   if (existing) return base64ToBytes(existing);
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
@@ -28,8 +38,28 @@ async function getOrCreateSalt(): Promise<Uint8Array> {
   return salt;
 }
 
-export async function deriveKey(passphrase: string): Promise<CryptoKey> {
-  const salt = await getOrCreateSalt();
+/** Replace the cached salt — called after a successful pull so the next
+ *  push uses the same salt the rest of the fleet expects. */
+export async function persistSalt(salt: Uint8Array): Promise<void> {
+  await setSetting('sync_salt_b64', bytesToBase64(salt));
+}
+
+export function saltToBase64(salt: Uint8Array): string {
+  return bytesToBase64(salt);
+}
+
+export function saltFromBase64(b64: string): Uint8Array {
+  return base64ToBytes(b64);
+}
+
+/**
+ * Derive an AES-GCM key from passphrase + salt. The salt parameter is
+ * required when decrypting a remote snapshot (use the salt that came
+ * with it); it's optional when encrypting a fresh push (defaults to
+ * the local cached salt).
+ */
+export async function deriveKey(passphrase: string, salt?: Uint8Array): Promise<CryptoKey> {
+  const useSalt = salt ?? await getOrCreateLocalSalt();
   const baseKey = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(passphrase),
@@ -37,8 +67,8 @@ export async function deriveKey(passphrase: string): Promise<CryptoKey> {
     false,
     ['deriveKey'],
   );
-  const ab = new ArrayBuffer(salt.byteLength);
-  new Uint8Array(ab).set(salt);
+  const ab = new ArrayBuffer(useSalt.byteLength);
+  new Uint8Array(ab).set(useSalt);
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt: ab, iterations: PBKDF2_ITER, hash: 'SHA-256' },
     baseKey,

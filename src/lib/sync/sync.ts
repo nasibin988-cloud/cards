@@ -16,7 +16,11 @@
  */
 
 import { exportSnapshotForSync, importSnapshot, type Snapshot } from '@/lib/backup/snapshot';
-import { encryptJson, decryptJson, deriveKey } from './crypto';
+import {
+  encryptJson, decryptJson, deriveKey,
+  getOrCreateLocalSalt, persistSalt,
+  saltToBase64, saltFromBase64,
+} from './crypto';
 import type { SyncAdapter } from './adapter';
 import { getJsonSetting, setJsonSetting } from '@/lib/db/queries';
 import { db } from '@/lib/db/dexie';
@@ -111,7 +115,12 @@ export async function push(
   passphrase: string,
   onProgress?: (p: SyncProgress) => void,
 ): Promise<SyncStatus> {
-  const key = await deriveKey(passphrase);
+  // Salt rides along with the encrypted blob so any device on the same
+  // passphrase can re-derive the key. Use the local cached salt; future
+  // pulls on the same device will keep using it (and other devices will
+  // adopt it after their first pull).
+  const salt = await getOrCreateLocalSalt();
+  const key = await deriveKey(passphrase, salt);
 
   // Stage 1: media diff + upload.
   await syncMediaUpload(adapter, onProgress);
@@ -122,7 +131,7 @@ export async function push(
   const blob = await encryptJson(snap, key);
   const meta = await getMeta();
   const newVersion = meta.version + 1;
-  const { remoteVersion } = await adapter.push(blob, newVersion);
+  const { remoteVersion } = await adapter.push(blob, newVersion, saltToBase64(salt));
   const newMeta: LocalMeta = {
     version: newVersion,
     lastSyncedRemoteVersion: remoteVersion,
@@ -149,13 +158,23 @@ export async function pull(
   onProgress?.({ phase: 'snapshot', kind: 'pull', current: 0, total: 1 });
   const remote = await adapter.pull();
   if (!remote) throw new Error('No remote snapshot to pull.');
-  const key = await deriveKey(passphrase);
+  // Use the salt that came with the snapshot so the key matches what the
+  // pushing device used. If the server is on the older format that didn't
+  // include salt, fall back to the local salt (this device's first push
+  // would have set it). Still works for single-device, fails the same
+  // "wrong passphrase" way for cross-device until the source pushes new.
+  const remoteSalt = remote.salt ? saltFromBase64(remote.salt) : undefined;
+  const key = await deriveKey(passphrase, remoteSalt);
   let snap: Snapshot;
   try {
     snap = await decryptJson<Snapshot>(remote.blob, key);
   } catch (err) {
     throw new Error('Decryption failed. Wrong passphrase?');
   }
+  // Successful decrypt — adopt the remote salt locally so subsequent
+  // pushes from this device use the same one and other devices stay
+  // in sync.
+  if (remoteSalt) await persistSalt(remoteSalt);
   await importSnapshot(snap, 'replace');
   await setMeta({
     version: remote.remoteVersion,

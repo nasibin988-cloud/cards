@@ -19,6 +19,13 @@ export interface RemoteSnapshot {
   blob: EncryptedBlob;
   remoteVersion: number;
   updatedAt: number;
+  /**
+   * Base64 PBKDF2 salt that goes with this snapshot's ciphertext. Newer
+   * snapshots include it; older ones don't (and will fail to decrypt on a
+   * device whose local salt differs — push fresh from the source device
+   * to migrate).
+   */
+  salt?: string;
 }
 
 export interface RemoteMeta {
@@ -27,7 +34,7 @@ export interface RemoteMeta {
 }
 
 export interface SyncAdapter {
-  push(blob: EncryptedBlob, version: number): Promise<{ remoteVersion: number }>;
+  push(blob: EncryptedBlob, version: number, salt?: string): Promise<{ remoteVersion: number }>;
   pull(): Promise<RemoteSnapshot | null>;
   /**
    * Optional: cheap status query that returns just the remote version and
@@ -144,14 +151,18 @@ export class SelfHostedAdapter implements SyncAdapter {
     this.token = cfg.token;
   }
 
-  async push(blob: EncryptedBlob, version: number): Promise<{ remoteVersion: number }> {
+  async push(
+    blob: EncryptedBlob,
+    version: number,
+    salt?: string,
+  ): Promise<{ remoteVersion: number }> {
     const r = await fetch(this.url, {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${this.token}`,
       },
-      body: JSON.stringify({ blob, version }),
+      body: JSON.stringify({ blob, version, salt }),
     });
     if (!r.ok) {
       const text = await r.text().catch(() => '');
@@ -175,11 +186,13 @@ export class SelfHostedAdapter implements SyncAdapter {
       blob: EncryptedBlob;
       version: number;
       updatedAt: string;
+      salt?: string;
     };
     return {
       blob: data.blob,
       remoteVersion: data.version,
       updatedAt: new Date(data.updatedAt).getTime(),
+      salt: data.salt,
     };
   }
 
@@ -222,11 +235,12 @@ export class SelfHostedAdapter implements SyncAdapter {
 const LOOPBACK_KEY = 'cards-sync-loopback';
 
 export class LoopbackAdapter implements SyncAdapter {
-  async push(blob: EncryptedBlob, version: number): Promise<{ remoteVersion: number }> {
+  async push(blob: EncryptedBlob, version: number, salt?: string): Promise<{ remoteVersion: number }> {
     const stored = {
       blob,
       version,
       updatedAt: Date.now(),
+      salt,
     };
     localStorage.setItem(LOOPBACK_KEY, JSON.stringify(stored));
     return { remoteVersion: version };
@@ -240,6 +254,7 @@ export class LoopbackAdapter implements SyncAdapter {
         blob: parsed.blob,
         remoteVersion: parsed.version,
         updatedAt: parsed.updatedAt,
+        salt: parsed.salt,
       };
     } catch {
       return null;
