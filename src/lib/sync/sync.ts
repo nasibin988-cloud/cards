@@ -305,11 +305,23 @@ function adapterToken(adapter: SyncAdapter): string | null {
   return typeof a.bearerToken === 'function' ? a.bearerToken() : null;
 }
 
+/** AbortController-backed fetch timeout. Same pattern as adapter.ts —
+ *  duplicated rather than exported so the sync module stays standalone. */
+async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 30_000): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 async function fetchRemoteMediaIndex(
   mediaUrl: string,
   token: string,
 ): Promise<Array<{ id: string; filename: string; mimeType: string; sizeBytes: number }>> {
-  const r = await fetch(mediaUrl, {
+  const r = await timedFetch(mediaUrl, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (!r.ok) throw new Error(`media index fetch failed (${r.status})`);
@@ -325,7 +337,7 @@ async function uploadMedia(
   mimeType: string,
   blob: Blob,
 ): Promise<void> {
-  const r = await fetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
+  const r = await timedFetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: {
       authorization: `Bearer ${token}`,
@@ -343,7 +355,7 @@ async function downloadMedia(
   token: string,
   id: string,
 ): Promise<ArrayBuffer | null> {
-  const r = await fetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
+  const r = await timedFetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (r.status === 404) return null;

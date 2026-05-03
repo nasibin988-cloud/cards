@@ -92,30 +92,13 @@ export interface EncryptedBlob {
   v: 1 | 2;
 }
 
-function canStreamCompress(): boolean {
-  return (
-    typeof CompressionStream !== 'undefined'
-    && typeof Blob !== 'undefined'
-    && typeof Blob.prototype.stream === 'function'
-  );
-}
-
 export async function encryptJson<T>(data: T, key: CryptoKey): Promise<EncryptedBlob> {
   const json = JSON.stringify(data);
-  // gzip when the runtime supports CompressionStream (real browsers,
-  // including Safari 17+). Fall back to uncompressed bytes in test
-  // environments (jsdom has no Blob.stream / CompressionStream) — same
-  // crypto, just the v:1 plaintext-shape so the legacy decrypt path
-  // round-trips.
-  let plaintext: Uint8Array;
-  let v: 1 | 2;
-  if (canStreamCompress()) {
-    plaintext = await gzipString(json);
-    v = 2;
-  } else {
-    plaintext = new TextEncoder().encode(json);
-    v = 1;
-  }
+  // Always emit v:1 (uncompressed). Gzip via CompressionStream silently
+  // hung pull on iPad Safari (likely <17), and the bandwidth saving
+  // wasn't worth a flaky pipeline. v:2 decrypt is still implemented so
+  // any previously-pushed v:2 snapshots in the wild continue to work.
+  const plaintext = new TextEncoder().encode(json);
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ivBuf = new ArrayBuffer(iv.byteLength);
   new Uint8Array(ivBuf).set(iv);
@@ -129,7 +112,7 @@ export async function encryptJson<T>(data: T, key: CryptoKey): Promise<Encrypted
   return {
     iv: bytesToBase64(iv),
     ct: bytesToBase64(new Uint8Array(ct)),
-    v,
+    v: 1,
   };
 }
 

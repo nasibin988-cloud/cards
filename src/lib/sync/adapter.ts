@@ -156,7 +156,7 @@ export class SelfHostedAdapter implements SyncAdapter {
     version: number,
     salt?: string,
   ): Promise<{ remoteVersion: number }> {
-    const r = await fetch(this.url, {
+    const r = await fetchWithTimeout(this.url, {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -173,7 +173,7 @@ export class SelfHostedAdapter implements SyncAdapter {
   }
 
   async pull(): Promise<RemoteSnapshot | null> {
-    const r = await fetch(this.url, {
+    const r = await fetchWithTimeout(this.url, {
       method: 'GET',
       headers: { authorization: `Bearer ${this.token}` },
     });
@@ -198,10 +198,10 @@ export class SelfHostedAdapter implements SyncAdapter {
 
   async pullMetadata(): Promise<RemoteMeta | null> {
     const sep = this.url.includes('?') ? '&' : '?';
-    const r = await fetch(`${this.url}${sep}meta=1`, {
+    const r = await fetchWithTimeout(`${this.url}${sep}meta=1`, {
       method: 'GET',
       headers: { authorization: `Bearer ${this.token}` },
-    });
+    }, 15_000);
     if (r.status === 204) return null;
     if (!r.ok) {
       const text = await r.text().catch(() => '');
@@ -227,6 +227,26 @@ export class SelfHostedAdapter implements SyncAdapter {
   /** Used by the sync layer to authorize media GET/PUT requests. */
   bearerToken(): string {
     return this.token;
+  }
+}
+
+/**
+ * fetch with an AbortController-backed timeout. Default 60s, override per
+ * call. Without this, a hung pull on iPad Safari just spins forever and
+ * the user sees an indefinite "syncing" pill — way worse UX than a clean
+ * timeout error.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 60_000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
   }
 }
 
