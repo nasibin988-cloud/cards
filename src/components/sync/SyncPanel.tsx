@@ -418,7 +418,11 @@ export default function SyncPanel() {
       )}
 
       {info && <div className="text-sm text-saffron-300 font-light">{info}</div>}
-      {error && <div className="text-sm text-crimson-300 font-light">{error}</div>}
+      {error && (
+        <div className="text-sm text-crimson-300 font-light bg-crimson-900/20 border border-crimson-800/30 rounded-xl p-3 break-words">
+          {error}
+        </div>
+      )}
     </div>
   );
 }
