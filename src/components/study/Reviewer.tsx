@@ -720,7 +720,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="px-3 md:px-6 py-3 md:py-4 flex items-center justify-between gap-3 border-b border-white/[0.04] backdrop-blur-md bg-dark-950/40 sticky top-0 z-30">
+      <header className="relative px-3 md:px-6 py-3 md:py-4 flex items-center justify-between gap-3 border-b border-white/[0.04] backdrop-blur-md bg-dark-950/40 sticky top-0 z-30">
         <div className="flex items-center gap-3 max-w-[28%] md:max-w-[24%] min-w-0 shrink-0">
           <Tooltip content={virtualScope?.label ?? deck.name} side="bottom">
             <Link
@@ -752,7 +752,11 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
             />
           )}
         </div>
-        <div className="flex-1 flex items-center justify-center gap-5 min-w-0 px-3">
+        {/* Middle stats group is absolutely positioned so it centers on the
+            viewport, NOT in the leftover space between deck-name and ASK
+            (which are different widths). pointer-events-none on the wrapper
+            + auto on children keeps the surrounding flex layout untouched. */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-5 pointer-events-none [&>*]:pointer-events-auto">
           {sessionStartDue !== null && sessionStartDue > 0 && (
             <div className="hidden md:flex items-center gap-2 shrink-0">
               <div className="w-28 h-1.5 rounded-full bg-dark-800/60 overflow-hidden">
