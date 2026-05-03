@@ -39,6 +39,12 @@ export type AutoSyncState =
   | { kind: 'diverged'; lastStatus: SyncStatus };
 
 const PUSH_DEBOUNCE_MS = 8_000;
+/** How often to retry a stuck push (network hiccup, server down, etc).
+ *  Without this, the only retry trigger is the next dirty event — which
+ *  may never come if the user stops editing. 60s is short enough that a
+ *  recovery still happens within one session, long enough not to hammer
+ *  the server when it's down. */
+const RETRY_HEARTBEAT_MS = 60_000;
 
 interface AdapterCfg {
   kind: 'self' | 'supabase';
@@ -102,6 +108,7 @@ export function useAutoSync(): AutoSyncState {
     let dirtyHandler: (() => void) | null = null;
     let visibilityHandler: (() => void) | null = null;
     let unloadHandler: (() => void) | null = null;
+    let heartbeatId: ReturnType<typeof setInterval> | null = null;
 
     const flushPush = async () => {
       if (!adapterRef.current || !passphraseRef.current) return;
@@ -219,6 +226,14 @@ export function useAutoSync(): AutoSyncState {
       };
       window.addEventListener('cards:dirty', dirtyHandler);
 
+      // Heartbeat: every minute, if there's still pending dirty work
+      // (e.g. the previous push errored out), retry. Without this the
+      // only retry trigger is the next user edit — which may never come
+      // if they stop interacting after the failure.
+      heartbeatId = setInterval(() => {
+        if (dirtyRef.current && !inFlightRef.current) void flushPush();
+      }, RETRY_HEARTBEAT_MS);
+
       // Flush on tab hide / unload so closing the tab doesn't lose data.
       visibilityHandler = () => {
         if (document.visibilityState === 'hidden') void flushPush();
@@ -232,6 +247,7 @@ export function useAutoSync(): AutoSyncState {
     return () => {
       cancelled = true;
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (heartbeatId) clearInterval(heartbeatId);
       if (dirtyHandler) window.removeEventListener('cards:dirty', dirtyHandler);
       if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler);
       if (unloadHandler) {

@@ -11,7 +11,7 @@ import {
   type SyncAdapter,
   SUPABASE_SETUP_SQL,
 } from '@/lib/sync/adapter';
-import { push, pull, status, verifyPassphrase, type SyncStatus } from '@/lib/sync/sync';
+import { push, pull, status, verifyPassphrase, type SyncStatus, type SyncProgress } from '@/lib/sync/sync';
 
 type AdapterKind = 'self' | 'supabase' | 'loopback';
 
@@ -46,6 +46,7 @@ export default function SyncPanel() {
   const [info, setInfo] = useState<string | null>(null);
   const [showSql, setShowSql] = useState(false);
   const [autoEnabled, setAutoEnabled] = useState(true);
+  const [progress, setProgress] = useState<SyncProgress | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -160,24 +161,26 @@ export default function SyncPanel() {
   const doPush = async () => {
     if (!adapter || !passphrase) return;
     if (status_?.state === 'diverged' && !confirm('Remote and local have diverged. Push will OVERWRITE the remote snapshot. Continue?')) return;
-    setBusy('push'); setError(null); setInfo(null);
+    setBusy('push'); setError(null); setInfo(null); setProgress(null);
     try {
-      const s = await push(adapter, passphrase);
+      const s = await push(adapter, passphrase, p => setProgress(p));
       setStatus_(s);
       setInfo('Pushed.');
       setBusy(null);
+      setProgress(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(null);
+      setProgress(null);
     }
   };
 
   const doPull = async () => {
     if (!adapter || !passphrase) return;
     if (!confirm('Pull will OVERWRITE local data. Continue?')) return;
-    setBusy('pull'); setError(null); setInfo(null);
+    setBusy('pull'); setError(null); setInfo(null); setProgress(null);
     try {
-      await pull(adapter, passphrase);
+      await pull(adapter, passphrase, p => setProgress(p));
       // Page reload after pull is the simplest way to make every
       // data-fetching component (DeckList, TodayBar, Reviewer, …)
       // re-read from the just-replaced IndexedDB. Without this, anything
@@ -191,6 +194,7 @@ export default function SyncPanel() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(null);
+      setProgress(null);
     }
   };
 
@@ -414,6 +418,7 @@ export default function SyncPanel() {
               {busy === 'pull' ? 'Pulling…' : 'Pull now'}
             </button>
           </div>
+          {progress && <ProgressLine p={progress} />}
         </div>
       )}
 
@@ -429,6 +434,27 @@ export default function SyncPanel() {
 
 const inputClass =
   'w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 placeholder:text-dark-500 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] focus:border-persian-500/30';
+
+function ProgressLine({ p }: { p: SyncProgress }) {
+  const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+  const verb = p.kind === 'push' ? 'uploading' : 'downloading';
+  const what = p.phase === 'snapshot'
+    ? 'snapshot'
+    : `media ${p.current}/${p.total}`;
+  return (
+    <div className="space-y-1.5">
+      <div className="text-2xs text-dark-400 font-mono uppercase tracking-widest tabular-nums">
+        {verb} {what}
+      </div>
+      <div className="h-1 rounded-full bg-dark-800/60 overflow-hidden">
+        <div
+          className="h-full bg-gradient-to-r from-saffron-400 to-persian-400 transition-all duration-200"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function Spinner() {
   // 14×14 SVG ring; CSS animation rotates it. Inline so no asset round-trip,

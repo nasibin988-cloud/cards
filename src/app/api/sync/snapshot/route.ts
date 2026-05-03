@@ -21,6 +21,8 @@ export const runtime = 'nodejs';
 
 const DATA_DIR = process.env.CARDS_SYNC_DATA_DIR || '/data';
 const SNAPSHOT_PATH = path.join(DATA_DIR, 'snapshot.json');
+const HISTORY_DIR = path.join(DATA_DIR, 'rolling');
+const HISTORY_KEEP = 5;
 
 function authOk(req: Request): boolean {
   const expected = process.env.CARDS_SYNC_TOKEN;
@@ -46,8 +48,36 @@ async function readSnapshot(): Promise<unknown | null> {
   }
 }
 
+async function rotateSnapshotHistory(): Promise<void> {
+  // Move the current snapshot (if any) into rolling/<ISO>.json before
+  // overwriting. Keeps the last HISTORY_KEEP files; older ones are
+  // unlinked. Cheap insurance against a bad push wiping good data.
+  // Best-effort: any failure here is non-fatal — the new write still
+  // proceeds because the user's current data is already what they want
+  // up there.
+  try {
+    await fs.access(SNAPSHOT_PATH);
+  } catch {
+    return; // No existing snapshot to rotate.
+  }
+  try {
+    await fs.mkdir(HISTORY_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const archived = path.join(HISTORY_DIR, `snapshot-${stamp}.json`);
+    await fs.copyFile(SNAPSHOT_PATH, archived);
+    const entries = (await fs.readdir(HISTORY_DIR))
+      .filter(n => n.startsWith('snapshot-') && n.endsWith('.json'))
+      .sort()
+      .reverse(); // newest first
+    for (const stale of entries.slice(HISTORY_KEEP)) {
+      await fs.unlink(path.join(HISTORY_DIR, stale)).catch(() => { /* skip */ });
+    }
+  } catch { /* rotation is best-effort; current write continues. */ }
+}
+
 async function writeSnapshot(payload: unknown): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });
+  await rotateSnapshotHistory();
   const tmp = `${SNAPSHOT_PATH}.tmp.${process.pid}.${Date.now()}`;
   await fs.writeFile(tmp, JSON.stringify(payload), 'utf8');
   await fs.rename(tmp, SNAPSHOT_PATH);

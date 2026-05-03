@@ -81,23 +81,55 @@ export async function deriveKey(passphrase: string, salt?: Uint8Array): Promise<
 export interface EncryptedBlob {
   iv: string;          // base64
   ct: string;          // base64
-  v: 1;                // version
+  /**
+   * Format version of the blob.
+   *  - 1: plaintext is JSON.stringify(data) bytes, AES-GCM encrypted.
+   *  - 2: plaintext is gzip(JSON.stringify(data)), AES-GCM encrypted.
+   *       Cuts a 20MB JSON snapshot to ~3MB on the wire.
+   * Decrypt path branches on this so existing v:1 blobs on the server
+   * still decrypt cleanly until a new push migrates them.
+   */
+  v: 1 | 2;
+}
+
+function canStreamCompress(): boolean {
+  return (
+    typeof CompressionStream !== 'undefined'
+    && typeof Blob !== 'undefined'
+    && typeof Blob.prototype.stream === 'function'
+  );
 }
 
 export async function encryptJson<T>(data: T, key: CryptoKey): Promise<EncryptedBlob> {
   const json = JSON.stringify(data);
+  // gzip when the runtime supports CompressionStream (real browsers,
+  // including Safari 17+). Fall back to uncompressed bytes in test
+  // environments (jsdom has no Blob.stream / CompressionStream) — same
+  // crypto, just the v:1 plaintext-shape so the legacy decrypt path
+  // round-trips.
+  let plaintext: Uint8Array;
+  let v: 1 | 2;
+  if (canStreamCompress()) {
+    plaintext = await gzipString(json);
+    v = 2;
+  } else {
+    plaintext = new TextEncoder().encode(json);
+    v = 1;
+  }
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ivBuf = new ArrayBuffer(iv.byteLength);
   new Uint8Array(ivBuf).set(iv);
+  const ctBuf = new ArrayBuffer(plaintext.byteLength);
+  new Uint8Array(ctBuf).set(plaintext);
   const ct = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: ivBuf },
     key,
-    new TextEncoder().encode(json),
+    ctBuf,
   );
   return {
     iv: bytesToBase64(iv),
     ct: bytesToBase64(new Uint8Array(ct)),
-    v: 1,
+    v,
   };
 }
 
@@ -113,7 +145,29 @@ export async function decryptJson<T>(blob: EncryptedBlob, key: CryptoKey): Promi
     key,
     ctBuf,
   );
+  if (blob.v === 2) {
+    const text = await gunzipToString(new Uint8Array(plain));
+    return JSON.parse(text) as T;
+  }
+  // Legacy v:1: plaintext is raw JSON bytes.
   return JSON.parse(new TextDecoder().decode(plain)) as T;
+}
+
+/** gzip a string via the browser's CompressionStream. Available in
+ *  Chrome 80+ / Safari 17+ / Firefox 113+ — covers everything we run on. */
+async function gzipString(s: string): Promise<Uint8Array> {
+  const cs = new CompressionStream('gzip');
+  const stream = new Blob([s]).stream().pipeThrough(cs);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+async function gunzipToString(bytes: Uint8Array): Promise<string> {
+  const ds = new DecompressionStream('gzip');
+  const ab = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(ab).set(bytes);
+  const stream = new Blob([ab]).stream().pipeThrough(ds);
+  return new Response(stream).text();
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
