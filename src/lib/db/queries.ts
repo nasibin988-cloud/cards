@@ -2653,7 +2653,13 @@ export interface TodayStudyStats {
 export async function getTodayStudyStats(): Promise<TodayStudyStats> {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const logs = await db().reviewLogs.where('review').above(start.getTime()).toArray();
+  // Optional epoch: when the user clicks "Reset today" we stash now() in
+  // this setting so the visible count restarts from zero. Cap by midnight
+  // so a stale epoch from yesterday doesn't suppress today's reviews.
+  const epochRaw = await getSetting('today_stats_epoch_ms');
+  const epoch = epochRaw ? parseInt(epochRaw, 10) : 0;
+  const since = Math.max(start.getTime(), Number.isFinite(epoch) ? epoch : 0);
+  const logs = await db().reviewLogs.where('review').above(since).toArray();
   let count = 0;
   let totalMs = 0;
   for (const l of logs) {
@@ -2664,6 +2670,16 @@ export async function getTodayStudyStats(): Promise<TodayStudyStats> {
   const perMinute = minutes > 0 ? count / minutes : 0;
   const secondsPerCard = count > 0 ? totalMs / count / 1000 : 0;
   return { count, totalMs, perMinute, secondsPerCard };
+}
+
+/**
+ * Reset the visible "today" counters without touching the underlying
+ * review log. Sets a per-user epoch the stats query clamps to. Clears
+ * itself implicitly at the next local midnight (the query takes
+ * max(midnight, epoch)).
+ */
+export async function resetTodayStats(): Promise<void> {
+  await setSetting('today_stats_epoch_ms', String(Date.now()));
 }
 
 /**
