@@ -29,6 +29,9 @@ export default function SettingsPage() {
   const [confirmNuke, setConfirmNuke] = useState(false);
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
+  const [pomodoroEnabled, setPomodoroEnabled] = useState(false);
+  const [pomodoroWork, setPomodoroWork] = useState('25');
+  const [pomodoroBreak, setPomodoroBreak] = useState('5');
 
   useEffect(() => {
     (async () => {
@@ -39,6 +42,9 @@ export default function SettingsPage() {
       const sbm = await getSetting('sibling_bury_minutes');
       const tm = await getJsonSetting<boolean>('study_type_mode', false);
       const cm = await getJsonSetting<boolean>('study_confidence_mode', false);
+      const pe = await getJsonSetting<boolean>('pomodoro_enabled', false);
+      const pw = await getJsonSetting<number>('pomodoro_work_minutes', 25);
+      const pb = await getJsonSetting<number>('pomodoro_break_minutes', 5);
       if (k) { setKeyDraft(k); setKeyStored(true); }
       if (m) setModel(m);
       if (r) setRetention(r);
@@ -46,6 +52,9 @@ export default function SettingsPage() {
       if (sbm) setSiblingBuryMin(sbm);
       setTypeMode(tm);
       setConfidenceMode(cm);
+      setPomodoroEnabled(pe);
+      setPomodoroWork(String(pw));
+      setPomodoroBreak(String(pb));
       if ('storage' in navigator && 'estimate' in navigator.storage) {
         const e = await navigator.storage.estimate();
         setStorage({ usage: e.usage ?? 0, quota: e.quota ?? 0 });
@@ -61,6 +70,23 @@ export default function SettingsPage() {
   const saveConfidenceMode = async (v: boolean) => {
     setConfidenceMode(v);
     await setJsonSetting('study_confidence_mode', v);
+  };
+
+  const savePomodoroEnabled = async (v: boolean) => {
+    setPomodoroEnabled(v);
+    await setJsonSetting('pomodoro_enabled', v);
+  };
+  const savePomodoroWork = async (v: string) => {
+    setPomodoroWork(v);
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n < 1 || n > 120) return;
+    await setJsonSetting('pomodoro_work_minutes', n);
+  };
+  const savePomodoroBreak = async (v: string) => {
+    setPomodoroBreak(v);
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n < 1 || n > 60) return;
+    await setJsonSetting('pomodoro_break_minutes', n);
   };
 
   const saveKey = async () => {
@@ -215,6 +241,41 @@ export default function SettingsPage() {
             </div>
           </div>
         </label>
+
+        <label className="flex items-start gap-3 cursor-pointer mt-4">
+          <input
+            type="checkbox"
+            checked={pomodoroEnabled}
+            onChange={e => savePomodoroEnabled(e.target.checked)}
+            className="mt-1 accent-saffron-400"
+          />
+          <div>
+            <div className="text-sm text-dark-100 font-light">Pomodoro timer during study</div>
+            <div className="text-xs text-dark-400 font-light mt-0.5">
+              When you open a deck, run a quiet work / break cycle (default 25 / 5). No countdown — phase changes show as a sleek background shift; during a break the card is hidden so you actually rest. End either phase early at any time; the cycle keeps going.
+            </div>
+          </div>
+        </label>
+        {pomodoroEnabled && (
+          <div className="mt-3 ml-7 grid grid-cols-2 gap-3">
+            <label className="block">
+              <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Work minutes</div>
+              <input
+                value={pomodoroWork}
+                onChange={e => savePomodoroWork(e.target.value)}
+                className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+              />
+            </label>
+            <label className="block">
+              <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Break minutes</div>
+              <input
+                value={pomodoroBreak}
+                onChange={e => savePomodoroBreak(e.target.value)}
+                className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+              />
+            </label>
+          </div>
+        )}
       </Section>
 
       <Section title="Read aloud (TTS)" subtitle="Browser-native speech synthesis. Free, offline, no API key.">

@@ -386,6 +386,39 @@ input.type-cloze:focus {
   animation: shimmer 1.5s infinite;
 }
 
+/* ─── Pomodoro phase backdrops ────────────────────────────────────
+ * Two ambient backgrounds for the Reviewer's main column. The wrapper
+ * is keyed on phaseStart so React remounts on each transition; that
+ * forces the entrance animation to replay. Steady-state styling stays
+ * subdued — the user shouldn't be staring at it.
+ */
+.pomodoro-work-bg {
+  /* Faint persian/teal wash, brief brighter pulse on entry to mark
+   * the end of a break. Fades to near-transparent so it doesn't fight
+   * the card's own glassmorphism. */
+  animation: pomodoroWorkIn 1.6s ease-out;
+  background-color: transparent;
+}
+.pomodoro-break-bg {
+  /* Warm saffron/amber wash — brain-friendly cue that focus is off. */
+  animation: pomodoroBreakIn 1.6s ease-out;
+  background:
+    radial-gradient(ellipse at 50% 0%,
+      rgba(168, 135, 79, 0.10) 0%,
+      rgba(168, 135, 79, 0.05) 35%,
+      transparent 70%);
+}
+@keyframes pomodoroBreakIn {
+  0%   { background-color: rgba(168, 135, 79, 0); }
+  20%  { background-color: rgba(168, 135, 79, 0.22); }
+  100% { background-color: rgba(168, 135, 79, 0.08); }
+}
+@keyframes pomodoroWorkIn {
+  0%   { background-color: rgba(120, 168, 138, 0); }
+  20%  { background-color: rgba(120, 168, 138, 0.18); }
+  100% { background-color: transparent; }
+}
+
 /* ─── Heatmap cells (used in stats) ───────────────────────────── */
 .heat-0 { background: rgba(255, 255, 255, 0.04); }
 .heat-1 { background: rgba(143, 114, 64, 0.20); }

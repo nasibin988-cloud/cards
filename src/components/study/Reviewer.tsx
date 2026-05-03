@@ -33,6 +33,12 @@ import {
 import type { SchedulerOptions } from '@/lib/fsrs/scheduler';
 import { analyzeDeckRetention, type DeckRetentionReport } from '@/lib/fsrs/analyze';
 import RetentionTuneToast from '@/components/study/RetentionTuneToast';
+import {
+  usePomodoro,
+  BreakOverlay,
+  EndWorkButton,
+  PomodoroBackdrop,
+} from '@/components/study/PomodoroLayer';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -108,6 +114,8 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const historyRef = useRef<UndoEntry[]>([]);
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
+  const pomodoro = usePomodoro();
+  const inBreak = pomodoro.enabled && pomodoro.phase === 'break';
   const [hint, setHint] = useState<string | null>(null);
   const [hintLoading, setHintLoading] = useState(false);
   const [lookupOpen, setLookupOpen] = useState(false);
@@ -397,11 +405,13 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   }, [card?.id, phase, resumeKey, noteIdFilter]);
 
   const reveal = useCallback(() => {
+    if (inBreak) return;
     if (phase === 'front') setPhase('back');
-  }, [phase]);
+  }, [phase, inBreak]);
 
   const rate = useCallback(
     async (rating: Rating) => {
+      if (inBreak) return;
       if (!card || phase !== 'back') return;
       const dur = Date.now() - shownAt;
       const opts = await effectiveOptsFor(card.deckId);
@@ -411,7 +421,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
       fetchNext();
     },
-    [card, phase, shownAt, effectiveOptsFor, fetchNext, resumeKey],
+    [card, phase, shownAt, effectiveOptsFor, fetchNext, resumeKey, inBreak],
   );
 
   const burry = useCallback(async () => {
@@ -805,6 +815,9 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
             </div>
             </Tooltip>
           )}
+          {pomodoro.enabled && pomodoro.phase === 'work' && (
+            <EndWorkButton onSkip={pomodoro.skipPhase} />
+          )}
         </div>
         <button
           onClick={() => setAskOpen(true)}
@@ -816,14 +829,17 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         </button>
       </header>
 
+      <PomodoroBackdrop phase={pomodoro.phase} phaseStart={pomodoro.phaseStart}>
       <div className="flex-1 flex flex-col items-center justify-start pt-8 md:pt-16 lg:pt-20 pb-10 px-4 md:px-6 max-w-3xl mx-auto w-full">
-        {phase === 'loading' && (
+        {inBreak && <BreakOverlay onSkip={pomodoro.skipPhase} />}
+
+        {!inBreak && phase === 'loading' && (
           <div className="text-dark-400 text-sm font-light loading-shimmer rounded-md px-4 py-2">
             Loading…
           </div>
         )}
 
-        {phase === 'empty' && (() => {
+        {!inBreak && phase === 'empty' && (() => {
           // Distinguish three "empty" states so we don't lie to the user
           // when there are clearly cards in the deck:
           //   1. Daily new-card cap reached but new cards remain.
@@ -921,7 +937,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
           );
         })()}
 
-        {feynmanOpen && card && note && (
+        {!inBreak && feynmanOpen && card && note && (
           <div className="w-full max-w-3xl glass-card rounded-2xl p-5 md:p-6 animate-slide-up">
             <FeynmanPanel
               note={note}
@@ -945,7 +961,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
           </div>
         )}
 
-        {!feynmanOpen && (phase === 'front' || phase === 'back') && card && note && (
+        {!inBreak && !feynmanOpen && (phase === 'front' || phase === 'back') && card && note && (
           <div className="w-full space-y-6">
             <div
               role={phase === 'front' ? 'button' : undefined}
@@ -1005,6 +1021,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
           </div>
         )}
       </div>
+      </PomodoroBackdrop>
 
       {note && card && (
         <AskAI open={askOpen} onClose={() => setAskOpen(false)} note={note} card={card} />
