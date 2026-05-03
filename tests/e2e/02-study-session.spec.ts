@@ -81,29 +81,29 @@ test.describe('Study session', () => {
     await expect(page.getByText(/Nothing due|No cards due right now/)).toBeVisible({ timeout: 5000 });
   });
 
-  test(', and . are dual-purpose: reveal on front, rate Again/Good on back', async ({ page }) => {
+  test('arrow keys are dual-purpose: reveal on front, rate Again/Good on back', async ({ page }) => {
     await wipeAndSeed(page);
-    const deckId = await createDeck(page, 'CommaPeriodKeys');
+    const deckId = await createDeck(page, 'ArrowKeys');
     await addBasicNote(page, deckId, 'card-α', 'a');
     await addBasicNote(page, deckId, 'card-β', 'b');
     await addBasicNote(page, deckId, 'card-γ', 'c');
 
     await page.goto(`/study/${deckId}`);
 
-    // Card α: `,` on the front reveals; `,` on the back rates Again (1).
+    // Card α: ← on the front reveals; ← on the back rates Again (1).
     await expect(page.getByText('card-α').first()).toBeVisible();
-    await page.keyboard.press(',');
+    await page.keyboard.press('ArrowLeft');
     await expect(page.getByRole('button', { name: /Again/i })).toBeVisible();
-    await page.keyboard.press(',');
+    await page.keyboard.press('ArrowLeft');
 
     // Again on a new card sends it to learning with a short delay; the picker
     // should advance to a different card now (β, since γ is later).
     await expect(page.getByText('card-β').first()).toBeVisible({ timeout: 4000 });
 
-    // Card β: `.` on the front reveals; `.` on the back rates Good (3).
-    await page.keyboard.press('.');
+    // Card β: → on the front reveals; → on the back rates Good (3).
+    await page.keyboard.press('ArrowRight');
     await expect(page.getByRole('button', { name: /Good/i })).toBeVisible();
-    await page.keyboard.press('.');
+    await page.keyboard.press('ArrowRight');
 
     await expect(page.getByText('card-γ').first()).toBeVisible({ timeout: 4000 });
   });

@@ -556,19 +556,18 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         if (phase === 'front') reveal();
         return;
       }
-      // `,` / `<` and `.` / `>`: bottom-row thumb shortcuts that double up.
-      // On the front they reveal (same as Space). On the back they rate —
-      // left key is Again (1), right key is Good (3) — so a fluent reviewer
-      // can drive the whole session from those two keys without moving their
-      // hands off the bottom row. Shifted variants (`<` `>`) are accepted so
-      // rating doesn't break if a finger stays on Shift.
-      if (e.key === ',' || e.key === '<') {
+      // Arrow keys double up as flip + rate. On the front they reveal
+      // (same as Space). On the back the left arrow rates Again (1) and
+      // the right arrow rates Good (3) — so a one-hand reviewer can
+      // drive the whole session from the arrow cluster. preventDefault
+      // stops the browser from interpreting them as scroll / back.
+      if (e.key === 'ArrowLeft') {
         e.preventDefault();
         if (phase === 'front') reveal();
         else if (phase === 'back') rate(1);
         return;
       }
-      if (e.key === '.' || e.key === '>') {
+      if (e.key === 'ArrowRight') {
         e.preventDefault();
         if (phase === 'front') reveal();
         else if (phase === 'back') rate(3);
