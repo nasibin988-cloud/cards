@@ -224,7 +224,14 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   }, [card?.id]);
 
   const [sessionStartDue, setSessionStartDue] = useState<number | null>(null);
-  const [sessionReviewed, setSessionReviewed] = useState(0);
+  /**
+   * IDs of cards rated at least once this session. Keeping a Set instead
+   * of a counter means a learning card that lapses and gets re-rated only
+   * counts once toward the session-progress bar — otherwise the bar can
+   * exceed 100% (e.g. "30/29") which the user found confusing.
+   */
+  const [sessionRatedIds, setSessionRatedIds] = useState<Set<string>>(() => new Set());
+  const sessionReviewed = sessionRatedIds.size;
   const [todayStats, setTodayStats] = useState<TodayStudyStats | null>(null);
 
   // Prefetch cache: warmed Card + Note for the card that would come AFTER
@@ -417,7 +424,8 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       const opts = await effectiveOptsFor(card.deckId);
       const { log } = await recordReview(card, rating, dur, opts);
       historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
-      setSessionReviewed(n => n + 1);
+      const ratedId = card.id;
+      setSessionRatedIds(s => s.has(ratedId) ? s : new Set(s).add(ratedId));
       try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
       fetchNext();
     },
@@ -525,10 +533,15 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     setNote(restoredNote);
     setPhase('front');
     setShownAt(Date.now());
-    // The session-progress bar tracks how many cards the user has rated this
-    // session. Undoing a rate should decrement; clamp at 0 since this fires
-    // even on snooze undos which never incremented the counter.
-    setSessionReviewed(n => Math.max(0, n - 1));
+    // Pull the just-undone card back out of the unique-rated set so the
+    // session-progress bar reflects the rollback. Snooze undos never put
+    // the id in the set in the first place, so the delete is a no-op.
+    setSessionRatedIds(s => {
+      if (!s.has(restoredCardId)) return s;
+      const n = new Set(s);
+      n.delete(restoredCardId);
+      return n;
+    });
     // Refresh deck counts so the chips/cap pill reflect the rolled-back state.
     const studyDeckIds = await resolveStudyDeckIds();
     const newCounts = await getDeckCounts(studyDeckIds);
@@ -696,10 +709,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     return `${Math.round(minutes)}m`;
   }
 
+  // Sleek "which lane is the current card in" indicator: keep the active
+  // lane chip at full color, dim the other two. Re-derived per render
+  // off card.state so it tracks the picker.
+  const activeLane: 'new' | 'learn' | 'review' | null = card?.state === 'new'
+    ? 'new'
+    : (card?.state === 'learning' || card?.state === 'relearning') ? 'learn'
+    : card?.state === 'review' ? 'review'
+    : null;
+
   return (
     <div className="min-h-screen flex flex-col">
       <header className="px-3 md:px-6 py-3 md:py-4 flex items-center justify-between gap-3 border-b border-white/[0.04] backdrop-blur-md bg-dark-950/40 sticky top-0 z-30">
-        <div className="flex items-center gap-3 max-w-[35%] md:max-w-[40%] min-w-0">
+        <div className="flex items-center gap-3 max-w-[28%] md:max-w-[24%] min-w-0 shrink-0">
           <Tooltip content={virtualScope?.label ?? deck.name} side="bottom">
             <Link
               href="/"
@@ -730,10 +752,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
             />
           )}
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex-1 flex items-center justify-center gap-5 min-w-0 px-3">
           {sessionStartDue !== null && sessionStartDue > 0 && (
-            <div className="hidden md:flex items-center gap-2">
-              <div className="w-32 h-1.5 rounded-full bg-dark-800/60 overflow-hidden">
+            <div className="hidden md:flex items-center gap-2 shrink-0">
+              <div className="w-28 h-1.5 rounded-full bg-dark-800/60 overflow-hidden">
                 <div
                   className="h-full bg-gradient-to-r from-crimson-700 via-saffron-500 to-persian-400 transition-all duration-300"
                   style={{
@@ -742,14 +764,14 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                 />
               </div>
               <span className="text-2xs uppercase tracking-widest tabular-nums text-dark-400">
-                {sessionReviewed}/{sessionStartDue}
+                {Math.min(sessionReviewed, sessionStartDue)}/{sessionStartDue}
               </span>
             </div>
           )}
-          <div className="hidden sm:flex items-center gap-3 text-2xs uppercase tracking-widest tabular-nums">
-            <span className="text-saffron-400">new {counts.new}</span>
-            <span className="text-crimson-400">learn {counts.learning}</span>
-            <span className="text-persian-300">review {counts.review}</span>
+          <div className="hidden sm:flex items-center gap-3 text-2xs uppercase tracking-widest tabular-nums shrink-0">
+            <span className={cn('text-saffron-400 transition-opacity', activeLane && activeLane !== 'new' && 'opacity-30')}>new {counts.new}</span>
+            <span className={cn('text-crimson-400 transition-opacity', activeLane && activeLane !== 'learn' && 'opacity-30')}>learn {counts.learning}</span>
+            <span className={cn('text-persian-300 transition-opacity', activeLane && activeLane !== 'review' && 'opacity-30')}>review {counts.review}</span>
           </div>
           {ttsPrefs.enabled && card && note && (
             <Tooltip
@@ -952,7 +974,8 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   intervalMultiplier: multiplier,
                 });
                 historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
-                setSessionReviewed(n => n + 1);
+                const ratedId = card.id;
+                setSessionRatedIds(s => s.has(ratedId) ? s : new Set(s).add(ratedId));
                 try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
                 setFeynmanOpen(false);
                 fetchNext();
