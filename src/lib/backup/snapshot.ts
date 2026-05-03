@@ -10,6 +10,7 @@
 import { db } from '@/lib/db/dexie';
 import { releaseAllMediaUrls } from '@/lib/db/queries';
 import { clearRenderCache } from '@/lib/cloze/parser';
+import { suspendDirty, resumeDirty } from '@/lib/sync/dirty';
 import type { Card, Deck, Media, Note, ReviewLog, Setting } from '@/lib/db/schema';
 
 export interface Snapshot {
@@ -60,35 +61,45 @@ export async function importSnapshot(snap: Snapshot, mode: 'merge' | 'replace' =
   // but a clean wipe avoids the next 100 renders cache-missing.)
   clearRenderCache();
 
+  // Suppress dirty events for the entire import: every bulkPut row would
+  // otherwise fire one, and on a 100MB snapshot that's tens of thousands
+  // of window events + scheduleFlush timer churn = unresponsive iPad.
+  // The auto-sync hook resumes pushing once the import is done; the
+  // explicit pull/push paths handle their own metadata.
+  suspendDirty();
   const dbi = db();
-  await dbi.transaction(
-    'rw',
-    [dbi.decks, dbi.notes, dbi.cards, dbi.reviewLogs, dbi.settings, dbi.media],
-    async () => {
-      if (mode === 'replace') {
-        await Promise.all([
-          dbi.decks.clear(), dbi.notes.clear(), dbi.cards.clear(),
-          dbi.reviewLogs.clear(), dbi.settings.clear(), dbi.media.clear(),
-        ]);
-      }
-      if (snap.decks.length) await dbi.decks.bulkPut(snap.decks);
-      if (snap.notes.length) await dbi.notes.bulkPut(snap.notes);
-      if (snap.cards.length) await dbi.cards.bulkPut(snap.cards);
-      if (snap.reviewLogs.length) await dbi.reviewLogs.bulkPut(snap.reviewLogs);
-      if (snap.settings.length) await dbi.settings.bulkPut(snap.settings);
-      if (snap.media.length) {
-        const restored: Media[] = await Promise.all(
-          snap.media.map(async m => ({
-            id: m.id,
-            filename: m.filename,
-            mimeType: m.mimeType,
-            blob: await base64ToBlob(m.base64, m.mimeType),
-          })),
-        );
-        await dbi.media.bulkPut(restored);
-      }
-    },
-  );
+  try {
+    await dbi.transaction(
+      'rw',
+      [dbi.decks, dbi.notes, dbi.cards, dbi.reviewLogs, dbi.settings, dbi.media],
+      async () => {
+        if (mode === 'replace') {
+          await Promise.all([
+            dbi.decks.clear(), dbi.notes.clear(), dbi.cards.clear(),
+            dbi.reviewLogs.clear(), dbi.settings.clear(), dbi.media.clear(),
+          ]);
+        }
+        if (snap.decks.length) await dbi.decks.bulkPut(snap.decks);
+        if (snap.notes.length) await dbi.notes.bulkPut(snap.notes);
+        if (snap.cards.length) await dbi.cards.bulkPut(snap.cards);
+        if (snap.reviewLogs.length) await dbi.reviewLogs.bulkPut(snap.reviewLogs);
+        if (snap.settings.length) await dbi.settings.bulkPut(snap.settings);
+        if (snap.media.length) {
+          const restored: Media[] = await Promise.all(
+            snap.media.map(async m => ({
+              id: m.id,
+              filename: m.filename,
+              mimeType: m.mimeType,
+              blob: await base64ToBlob(m.base64, m.mimeType),
+            })),
+          );
+          await dbi.media.bulkPut(restored);
+        }
+      },
+    );
+  } finally {
+    resumeDirty();
+  }
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {

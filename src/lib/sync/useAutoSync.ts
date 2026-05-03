@@ -110,10 +110,33 @@ export function useAutoSync(): AutoSyncState {
       inFlightRef.current = true;
       dirtyRef.current = false;
       try {
-        setState({ kind: 'syncing', phase: 'push' });
-        const s = await push(adapterRef.current, passphraseRef.current);
-        if (!cancelled) {
+        // Cheap status check first; only push if local is genuinely
+        // ahead. The dirty event fires on every Dexie write, including
+        // those that don't bump the local sync version (settings table
+        // is excluded from hooks, so most writes do bump it — but a
+        // status check is still much cheaper than re-encrypting a
+        // 100MB snapshot just to discover the server is already current).
+        const s = await status(adapterRef.current);
+        if (cancelled) return;
+        if (s.state === 'in-sync') {
           setState({ kind: 'idle', lastStatus: s, lastError: null });
+          return;
+        }
+        if (s.state === 'diverged') {
+          setState({ kind: 'diverged', lastStatus: s });
+          return;
+        }
+        if (s.state === 'behind') {
+          // Don't auto-pull from a debounced push handler — that's the
+          // job of the on-mount path. Just record status and bail.
+          setState({ kind: 'idle', lastStatus: s, lastError: null });
+          return;
+        }
+        // 'ahead' or 'untouched' — push.
+        setState({ kind: 'syncing', phase: 'push' });
+        const after = await push(adapterRef.current, passphraseRef.current);
+        if (!cancelled) {
+          setState({ kind: 'idle', lastStatus: after, lastError: null });
         }
       } catch (err) {
         // Re-set dirty so a later attempt retries; surface the error.

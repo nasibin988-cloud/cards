@@ -21,9 +21,22 @@ export interface RemoteSnapshot {
   updatedAt: number;
 }
 
+export interface RemoteMeta {
+  remoteVersion: number;
+  updatedAt: number;
+}
+
 export interface SyncAdapter {
   push(blob: EncryptedBlob, version: number): Promise<{ remoteVersion: number }>;
   pull(): Promise<RemoteSnapshot | null>;
+  /**
+   * Optional: cheap status query that returns just the remote version and
+   * updatedAt, without the encrypted blob. Adapters that don't implement
+   * this fall back to `pull()` (which downloads the full snapshot) — fine
+   * for small data, painful at 100MB+. SelfHostedAdapter implements this
+   * via `?meta=1`.
+   */
+  pullMetadata?(): Promise<RemoteMeta | null>;
 }
 
 /* ─── Supabase adapter ───────────────────────────────────────── */
@@ -165,6 +178,24 @@ export class SelfHostedAdapter implements SyncAdapter {
     };
     return {
       blob: data.blob,
+      remoteVersion: data.version,
+      updatedAt: new Date(data.updatedAt).getTime(),
+    };
+  }
+
+  async pullMetadata(): Promise<RemoteMeta | null> {
+    const sep = this.url.includes('?') ? '&' : '?';
+    const r = await fetch(`${this.url}${sep}meta=1`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+    if (r.status === 204) return null;
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`metadata fetch failed (${r.status}): ${text || r.statusText}`);
+    }
+    const data = (await r.json()) as { version: number; updatedAt: string };
+    return {
       remoteVersion: data.version,
       updatedAt: new Date(data.updatedAt).getTime(),
     };

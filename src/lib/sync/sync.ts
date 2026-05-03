@@ -53,8 +53,20 @@ export async function bumpLocalVersion() {
 
 export async function status(adapter: SyncAdapter): Promise<SyncStatus> {
   const meta = await getMeta();
-  const remote = await adapter.pull();
-  if (!remote) {
+  // Prefer the cheap metadata endpoint when the adapter has it. Falls back
+  // to a full pull for adapters without that capability (Loopback, legacy
+  // Supabase) — fine for small data, painful at 100MB+. SelfHostedAdapter
+  // implements pullMetadata, so the production path stays fast.
+  let remoteVersion: number | null = null;
+  let remoteUpdatedAt: number | null = null;
+  if (adapter.pullMetadata) {
+    const m = await adapter.pullMetadata();
+    if (m) { remoteVersion = m.remoteVersion; remoteUpdatedAt = m.updatedAt; }
+  } else {
+    const r = await adapter.pull();
+    if (r) { remoteVersion = r.remoteVersion; remoteUpdatedAt = r.updatedAt; }
+  }
+  if (remoteVersion === null) {
     return {
       state: 'untouched',
       localVersion: meta.version,
@@ -64,11 +76,11 @@ export async function status(adapter: SyncAdapter): Promise<SyncStatus> {
     };
   }
   let state: SyncState;
-  if (meta.version === meta.lastSyncedRemoteVersion && remote.remoteVersion === meta.lastSyncedRemoteVersion) {
+  if (meta.version === meta.lastSyncedRemoteVersion && remoteVersion === meta.lastSyncedRemoteVersion) {
     state = 'in-sync';
-  } else if (meta.version > meta.lastSyncedRemoteVersion && remote.remoteVersion === meta.lastSyncedRemoteVersion) {
+  } else if (meta.version > meta.lastSyncedRemoteVersion && remoteVersion === meta.lastSyncedRemoteVersion) {
     state = 'ahead';
-  } else if (meta.version === meta.lastSyncedRemoteVersion && remote.remoteVersion > meta.lastSyncedRemoteVersion) {
+  } else if (meta.version === meta.lastSyncedRemoteVersion && remoteVersion > meta.lastSyncedRemoteVersion) {
     state = 'behind';
   } else {
     state = 'diverged';
@@ -76,9 +88,9 @@ export async function status(adapter: SyncAdapter): Promise<SyncStatus> {
   return {
     state,
     localVersion: meta.version,
-    remoteVersion: remote.remoteVersion,
+    remoteVersion,
     lastSyncMs: meta.lastSyncMs || null,
-    remoteUpdatedAt: remote.updatedAt,
+    remoteUpdatedAt,
   };
 }
 

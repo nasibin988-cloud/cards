@@ -57,11 +57,20 @@ export async function GET(req: Request) {
   if (!authOk(req)) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
+  // `?meta=1` returns just the version + updatedAt without the blob, so
+  // status checks don't have to download the full snapshot. Snapshots
+  // grow large fast (media is base64'd inline); a 100MB roundtrip on
+  // every page load was knocking out the iPad.
+  const url = new URL(req.url);
+  const metaOnly = url.searchParams.get('meta') === '1';
   try {
     const snap = await readSnapshot();
     if (snap === null) {
-      // Empty body — client treats this as "no remote snapshot yet."
       return new NextResponse(null, { status: 204 });
+    }
+    if (metaOnly && typeof snap === 'object' && snap !== null) {
+      const s = snap as { version?: number; updatedAt?: string };
+      return NextResponse.json({ version: s.version, updatedAt: s.updatedAt });
     }
     return NextResponse.json(snap);
   } catch (err) {
