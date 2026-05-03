@@ -13,6 +13,13 @@ import { clearRenderCache } from '@/lib/cloze/parser';
 import { suspendDirty, resumeDirty } from '@/lib/sync/dirty';
 import type { Card, Deck, Media, Note, ReviewLog, Setting } from '@/lib/db/schema';
 
+export interface MediaRef {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface Snapshot {
   version: 1;
   exportedAt: number;
@@ -21,7 +28,19 @@ export interface Snapshot {
   cards: Card[];
   reviewLogs: ReviewLog[];
   settings: Setting[];
-  media: Array<{ id: string; filename: string; mimeType: string; base64: string }>;
+  /**
+   * Inline base64 media. Used by local backups + Anki-export so the
+   * snapshot is fully self-contained on disk. Sync exports omit this
+   * field (use `mediaRefs` instead) so a 100MB image set doesn't have
+   * to traverse the network on every push/pull.
+   */
+  media?: Array<{ id: string; filename: string; mimeType: string; base64: string }>;
+  /**
+   * Sync-flavored manifest of media: identity + mimetype + size, no
+   * bytes. The sync pipeline diffs this against the server's media
+   * index and uploads/downloads only what's missing.
+   */
+  mediaRefs?: MediaRef[];
 }
 
 export async function exportSnapshot(): Promise<Snapshot> {
@@ -47,6 +66,37 @@ export async function exportSnapshot(): Promise<Snapshot> {
     exportedAt: Date.now(),
     decks, notes, cards, reviewLogs, settings,
     media: mediaEncoded,
+  };
+}
+
+/**
+ * Sync-flavored snapshot: tables but no media bytes. Just refs (id,
+ * filename, mimeType, sizeBytes). The sync layer uploads media files
+ * separately via /api/sync/media/<id>; pulling does the inverse. Keeps
+ * the encrypted blob small enough to round-trip on iPad Safari even
+ * with thousands of card images.
+ */
+export async function exportSnapshotForSync(): Promise<Snapshot> {
+  const dbi = db();
+  const [decks, notes, cards, reviewLogs, settings, media] = await Promise.all([
+    dbi.decks.toArray(),
+    dbi.notes.toArray(),
+    dbi.cards.toArray(),
+    dbi.reviewLogs.toArray(),
+    dbi.settings.toArray(),
+    dbi.media.toArray(),
+  ]);
+  const mediaRefs: MediaRef[] = media.map(m => ({
+    id: m.id,
+    filename: m.filename,
+    mimeType: m.mimeType,
+    sizeBytes: m.blob.size,
+  }));
+  return {
+    version: 1,
+    exportedAt: Date.now(),
+    decks, notes, cards, reviewLogs, settings,
+    mediaRefs,
   };
 }
 
@@ -84,7 +134,14 @@ export async function importSnapshot(snap: Snapshot, mode: 'merge' | 'replace' =
         if (snap.cards.length) await dbi.cards.bulkPut(snap.cards);
         if (snap.reviewLogs.length) await dbi.reviewLogs.bulkPut(snap.reviewLogs);
         if (snap.settings.length) await dbi.settings.bulkPut(snap.settings);
-        if (snap.media.length) {
+        // Two media formats:
+        //   - `media`: legacy / local-backup format with inline base64
+        //     bytes. Decode and store each blob.
+        //   - `mediaRefs`: sync format with refs only. Insert placeholder
+        //     rows (empty Blob) so subsequent backfill knows what's missing
+        //     and so a Card → Note → image lookup doesn't 404 outright;
+        //     `getMediaUrl` falls back to a server fetch on size-0 blobs.
+        if (snap.media && snap.media.length) {
           const restored: Media[] = await Promise.all(
             snap.media.map(async m => ({
               id: m.id,
@@ -94,6 +151,14 @@ export async function importSnapshot(snap: Snapshot, mode: 'merge' | 'replace' =
             })),
           );
           await dbi.media.bulkPut(restored);
+        } else if (snap.mediaRefs && snap.mediaRefs.length) {
+          const placeholders: Media[] = snap.mediaRefs.map(r => ({
+            id: r.id,
+            filename: r.filename,
+            mimeType: r.mimeType,
+            blob: new Blob([], { type: r.mimeType }),
+          }));
+          await dbi.media.bulkPut(placeholders);
         }
       },
     );
@@ -241,7 +306,7 @@ export async function diffSnapshot(snap: Snapshot): Promise<SnapshotDiff> {
     notes: tally(notes, snap.notes),
     cards: tally(cards, snap.cards),
     reviewLogs: tally(reviewLogs, snap.reviewLogs),
-    media: tally(media, snap.media),
+    media: tally(media, snap.media ?? []),
     deckNamesLost,
     deckNamesGained,
   };

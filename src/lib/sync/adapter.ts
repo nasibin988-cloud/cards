@@ -200,6 +200,21 @@ export class SelfHostedAdapter implements SyncAdapter {
       updatedAt: new Date(data.updatedAt).getTime(),
     };
   }
+
+  /**
+   * Sibling endpoint for media files. Snapshot URL is e.g.
+   * `https://host/cards/api/sync/snapshot`; media is at
+   * `https://host/cards/api/sync/media`. We derive by string-replace so the
+   * user only configures one URL in Settings.
+   */
+  mediaIndexUrl(): string {
+    return this.url.replace(/\/snapshot(?=$|\?)/, '/media');
+  }
+
+  /** Used by the sync layer to authorize media GET/PUT requests. */
+  bearerToken(): string {
+    return this.token;
+  }
 }
 
 /* ─── Loopback adapter (testing) ─────────────────────────────── */

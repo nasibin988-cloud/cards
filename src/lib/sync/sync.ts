@@ -15,10 +15,11 @@
  * restore code path is shared.
  */
 
-import { exportSnapshot, importSnapshot, type Snapshot } from '@/lib/backup/snapshot';
-import { encryptJson, decryptJson, deriveKey, type EncryptedBlob } from './crypto';
-import type { SyncAdapter, RemoteSnapshot } from './adapter';
+import { exportSnapshotForSync, importSnapshot, type Snapshot } from '@/lib/backup/snapshot';
+import { encryptJson, decryptJson, deriveKey } from './crypto';
+import type { SyncAdapter } from './adapter';
 import { getJsonSetting, setJsonSetting } from '@/lib/db/queries';
+import { db } from '@/lib/db/dexie';
 
 export type SyncState = 'untouched' | 'in-sync' | 'ahead' | 'behind' | 'diverged';
 
@@ -94,10 +95,30 @@ export async function status(adapter: SyncAdapter): Promise<SyncStatus> {
   };
 }
 
-/** Force-push local snapshot to remote (overwrites whatever's there). */
-export async function push(adapter: SyncAdapter, passphrase: string): Promise<SyncStatus> {
+/**
+ * Push: upload missing media files to the server first, then push the
+ * (small) JSON snapshot. The snapshot now carries `mediaRefs` instead of
+ * inline base64 bytes, so the encrypted blob stays small even with
+ * thousands of card images. The full bytes round-trip via individual
+ * /api/sync/media/<id> requests, idempotent and skippable when the
+ * server already has them.
+ *
+ * Optional progress callback fires per stage so the UI can show "uploaded
+ * 47/120 media".
+ */
+export async function push(
+  adapter: SyncAdapter,
+  passphrase: string,
+  onProgress?: (p: SyncProgress) => void,
+): Promise<SyncStatus> {
   const key = await deriveKey(passphrase);
-  const snap = await exportSnapshot();
+
+  // Stage 1: media diff + upload.
+  await syncMediaUpload(adapter, onProgress);
+
+  // Stage 2: push the small snapshot.
+  onProgress?.({ phase: 'snapshot', kind: 'push', current: 0, total: 1 });
+  const snap = await exportSnapshotForSync();
   const blob = await encryptJson(snap, key);
   const meta = await getMeta();
   const newVersion = meta.version + 1;
@@ -108,11 +129,24 @@ export async function push(adapter: SyncAdapter, passphrase: string): Promise<Sy
     lastSyncMs: Date.now(),
   };
   await setMeta(newMeta);
+  onProgress?.({ phase: 'snapshot', kind: 'push', current: 1, total: 1 });
   return status(adapter);
 }
 
-/** Force-pull from remote (overwrites local). */
-export async function pull(adapter: SyncAdapter, passphrase: string): Promise<SyncStatus> {
+/**
+ * Pull: fetch the small snapshot, import it, then backfill media files
+ * that aren't yet local. Snapshot import is fast (~MBs); media backfill
+ * runs sequentially in the background so the UI is responsive.
+ *
+ * Cards whose media isn't yet downloaded fall through to a server-fetch
+ * via getMediaUrl, so the user can study right away.
+ */
+export async function pull(
+  adapter: SyncAdapter,
+  passphrase: string,
+  onProgress?: (p: SyncProgress) => void,
+): Promise<SyncStatus> {
+  onProgress?.({ phase: 'snapshot', kind: 'pull', current: 0, total: 1 });
   const remote = await adapter.pull();
   if (!remote) throw new Error('No remote snapshot to pull.');
   const key = await deriveKey(passphrase);
@@ -128,7 +162,174 @@ export async function pull(adapter: SyncAdapter, passphrase: string): Promise<Sy
     lastSyncedRemoteVersion: remote.remoteVersion,
     lastSyncMs: Date.now(),
   });
+  onProgress?.({ phase: 'snapshot', kind: 'pull', current: 1, total: 1 });
+
+  // Backfill media. Run in the background so the caller's UI is
+  // responsive: we don't await this — the caller resolves as soon as
+  // the data tables are populated. Cards with not-yet-downloaded media
+  // lazy-load via getMediaUrl's server fallback.
+  if (snap.mediaRefs && snap.mediaRefs.length) {
+    void syncMediaDownload(adapter, snap.mediaRefs, onProgress);
+  }
+
   return status(adapter);
+}
+
+export interface SyncProgress {
+  phase: 'snapshot' | 'media';
+  kind: 'push' | 'pull';
+  current: number;
+  total: number;
+}
+
+/* ─── Media transfer (one HTTP request per file) ────────────────── */
+
+/**
+ * Find local media not on the server and upload them. Skips files the
+ * server already has (HEAD check). Concurrency is conservative — Safari
+ * caps simultaneous fetches per origin and aggressive parallelism just
+ * stalls without helping throughput.
+ */
+async function syncMediaUpload(
+  adapter: SyncAdapter,
+  onProgress?: (p: SyncProgress) => void,
+): Promise<void> {
+  const mediaUrl = adapterMediaIndexUrl(adapter);
+  const token = adapterToken(adapter);
+  if (!mediaUrl || !token) return; // Adapter doesn't support per-file media
+  // Bind to locals so the worker closures don't have to re-narrow on each iteration.
+  const url: string = mediaUrl;
+  const tok: string = token;
+
+  const local = await db().media.toArray();
+  if (local.length === 0) return;
+
+  const remoteList = await fetchRemoteMediaIndex(url, tok);
+  const remoteIds = new Set(remoteList.map(r => r.id));
+  const missing = local.filter(m => !remoteIds.has(m.id) && m.blob.size > 0);
+
+  if (missing.length === 0) return;
+
+  let done = 0;
+  onProgress?.({ phase: 'media', kind: 'push', current: done, total: missing.length });
+
+  const PARALLEL = 4;
+  const queue = [...missing];
+  async function worker() {
+    while (queue.length > 0) {
+      const m = queue.shift();
+      if (!m) return;
+      try {
+        await uploadMedia(url, tok, m.id, m.filename, m.mimeType, m.blob);
+      } catch { /* fail soft per-file; user can retry. */ }
+      done++;
+      onProgress?.({ phase: 'media', kind: 'push', current: done, total: missing.length });
+    }
+  }
+  await Promise.all(Array.from({ length: PARALLEL }, () => worker()));
+}
+
+async function syncMediaDownload(
+  adapter: SyncAdapter,
+  refs: Array<{ id: string; filename: string; mimeType: string }>,
+  onProgress?: (p: SyncProgress) => void,
+): Promise<void> {
+  const mediaUrl = adapterMediaIndexUrl(adapter);
+  const token = adapterToken(adapter);
+  if (!mediaUrl || !token) return;
+  const url: string = mediaUrl;
+  const tok: string = token;
+
+  const local = await db().media.toArray();
+  // A row exists for every ref (we put placeholders during importSnapshot);
+  // fetch when the placeholder is empty.
+  const placeholderIds = new Set(local.filter(m => m.blob.size === 0).map(m => m.id));
+  const todo = refs.filter(r => placeholderIds.has(r.id));
+  if (todo.length === 0) return;
+
+  let done = 0;
+  onProgress?.({ phase: 'media', kind: 'pull', current: done, total: todo.length });
+
+  const PARALLEL = 4;
+  const queue = [...todo];
+  async function worker() {
+    while (queue.length > 0) {
+      const r = queue.shift();
+      if (!r) return;
+      try {
+        const blob = await downloadMedia(url, tok, r.id);
+        if (blob) {
+          await db().media.update(r.id, {
+            blob: new Blob([blob], { type: r.mimeType }),
+          });
+        }
+      } catch { /* fail soft per-file. */ }
+      done++;
+      onProgress?.({ phase: 'media', kind: 'pull', current: done, total: todo.length });
+    }
+  }
+  await Promise.all(Array.from({ length: PARALLEL }, () => worker()));
+}
+
+/**
+ * Derive the media-index URL from the snapshot URL. The adapter doesn't
+ * expose its URL directly, so we duck-type: SelfHostedAdapter has a
+ * `mediaIndexUrl` getter we add below; other adapters return null and
+ * the media-sync becomes a no-op.
+ */
+function adapterMediaIndexUrl(adapter: SyncAdapter): string | null {
+  const a = adapter as unknown as { mediaIndexUrl?: () => string };
+  return typeof a.mediaIndexUrl === 'function' ? a.mediaIndexUrl() : null;
+}
+function adapterToken(adapter: SyncAdapter): string | null {
+  const a = adapter as unknown as { bearerToken?: () => string };
+  return typeof a.bearerToken === 'function' ? a.bearerToken() : null;
+}
+
+async function fetchRemoteMediaIndex(
+  mediaUrl: string,
+  token: string,
+): Promise<Array<{ id: string; filename: string; mimeType: string; sizeBytes: number }>> {
+  const r = await fetch(mediaUrl, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error(`media index fetch failed (${r.status})`);
+  const data = (await r.json()) as { items?: Array<{ id: string; filename: string; mimeType: string; sizeBytes: number }> };
+  return data.items ?? [];
+}
+
+async function uploadMedia(
+  mediaUrl: string,
+  token: string,
+  id: string,
+  filename: string,
+  mimeType: string,
+  blob: Blob,
+): Promise<void> {
+  const r = await fetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': mimeType,
+      'x-mime-type': mimeType,
+      'x-filename': encodeURIComponent(filename),
+    },
+    body: blob,
+  });
+  if (!r.ok) throw new Error(`upload failed for ${id} (${r.status})`);
+}
+
+async function downloadMedia(
+  mediaUrl: string,
+  token: string,
+  id: string,
+): Promise<ArrayBuffer | null> {
+  const r = await fetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`download failed for ${id} (${r.status})`);
+  return r.arrayBuffer();
 }
 
 /** Self-test: encrypt + decrypt a tiny payload to verify the key works. */

@@ -43,8 +43,24 @@ export async function getMediaUrl(filename: string): Promise<string | null> {
     touch(filename, cached);
     return cached;
   }
-  const m = await db().media.where('filename').equals(filename).first();
+  let m = await db().media.where('filename').equals(filename).first();
   if (!m) return null;
+  // Sync placeholder: importSnapshot writes empty Blobs for media listed
+  // in the snapshot's mediaRefs, so the row exists before the bytes do.
+  // Try a lazy fetch from the sync server before giving up — lets cards
+  // render the moment the snapshot lands, before the background backfill
+  // catches up.
+  if (m.blob.size === 0) {
+    const fetched = await lazyFetchMedia(m.id, m.mimeType);
+    if (fetched) {
+      try {
+        await db().media.update(m.id, { blob: fetched });
+        m = { ...m, blob: fetched };
+      } catch { /* on conflict the next read picks up the latest. */ }
+    } else {
+      return null;
+    }
+  }
   // Some imports stored Blobs without an inferred MIME (JSZip's `async('blob')`
   // can't guess from numeric zip-entry names like "0", "1", "2"). When the
   // blob has no type, `URL.createObjectURL` produces a URL the browser
@@ -54,6 +70,34 @@ export async function getMediaUrl(filename: string): Promise<string | null> {
   const url = URL.createObjectURL(blob);
   touch(filename, url);
   return url;
+}
+
+/**
+ * Pull a single media file from the sync server. Used both for the
+ * post-pull backfill and for the on-demand fallback above. Reads the
+ * adapter config the user saved in settings; returns null if sync isn't
+ * configured (so the caller can degrade gracefully).
+ */
+async function lazyFetchMedia(id: string, mimeType: string): Promise<Blob | null> {
+  try {
+    const cfg = await db().settings.get('sync_adapter_config');
+    if (!cfg) return null;
+    const parsed = JSON.parse(cfg.value) as {
+      kind?: string;
+      url?: string;
+      token?: string;
+    };
+    if (parsed.kind !== 'self' || !parsed.url || !parsed.token) return null;
+    const mediaUrl = parsed.url.replace(/\/snapshot(?=$|\?)/, '/media');
+    const r = await fetch(`${mediaUrl}/${encodeURIComponent(id)}`, {
+      headers: { authorization: `Bearer ${parsed.token}` },
+    });
+    if (!r.ok) return null;
+    const buf = await r.arrayBuffer();
+    return new Blob([buf], { type: mimeType });
+  } catch {
+    return null;
+  }
 }
 
 /**
