@@ -225,6 +225,12 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
 
   const [sessionStartDue, setSessionStartDue] = useState<number | null>(null);
   /**
+   * "Continue ahead anyway" mode. Set when the user clicks the empty-state
+   * button to study past the daily caps and pull learning cards before
+   * their step would normally come up. Sticks for the rest of the session.
+   */
+  const [forceContinue, setForceContinue] = useState(false);
+  /**
    * IDs of cards rated at least once this session. Keeping a Set instead
    * of a counter means a learning card that lapses and gets re-rated only
    * counts once toward the session-progress bar — otherwise the bar can
@@ -297,7 +303,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     if (!next) {
       next = noteIdFilter
         ? await getNextCardFromNoteSet(noteIdFilter)
-        : await getNextCardForStudy(studyDeckIds);
+        : await getNextCardForStudy(studyDeckIds, new Date(), { force: forceContinue });
       if (next) n = await getNote(next.noteId);
     }
 
@@ -332,7 +338,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       const currentId = next.id;
       void (async () => {
         try {
-          const peek = await peekNextCardForStudy(studyDeckIds, currentId);
+          const peek = await peekNextCardForStudy(studyDeckIds, currentId, new Date(), { force: forceContinue });
           if (!peek) return;
           const peekNote = await getNote(peek.noteId);
           if (!peekNote) return;
@@ -343,7 +349,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       })();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolveStudyDeckIds, effectiveOptsFor, noteIdFilter]);
+  }, [resolveStudyDeckIds, effectiveOptsFor, noteIdFilter, forceContinue]);
 
   // Try to restore a card the user was on before reload/tab close. Falls
   // through to fetchNext on miss so the regular path still drives the first
@@ -921,6 +927,13 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
             );
           }
           const showTuningLink = newCapBinding || reviewCapBinding;
+          // The "Continue ahead" escape hatch: useful when there's
+          // anything left in the deck (any state) that the picker is
+          // gating off — pending learning steps, a hit cap, or a
+          // pre-cap pool that's been fully tasted today. Hide it for
+          // the genuinely-empty case.
+          const hasMoreInScope = counts.new > 0 || counts.learning > 0 || counts.review > 0;
+          const showContinueAhead = hasMoreInScope && (newCapBinding || reviewCapBinding || learningPending);
           // For virtual-parent study there's no single deck-edit destination;
           // route to the deck page instead so the user can pick a sub-deck.
           const deckEditHref = virtualScope
@@ -933,10 +946,23 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               </h2>
               <p className="text-dark-300 font-light">{body}</p>
               <div className="flex gap-3 justify-center pt-2 flex-wrap">
+                {showContinueAhead && (
+                  <button
+                    onClick={() => { setForceContinue(true); fetchNext(); }}
+                    className="btn-gradient px-5 py-2 rounded-xl text-sm"
+                  >
+                    Continue ahead anyway
+                  </button>
+                )}
                 {showTuningLink && (
                   <Link
                     href={deckEditHref}
-                    className="btn-gradient px-5 py-2 rounded-xl text-sm"
+                    className={cn(
+                      'px-5 py-2 rounded-xl text-sm transition',
+                      showContinueAhead
+                        ? 'text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] border border-white/[0.06]'
+                        : 'btn-gradient',
+                    )}
                   >
                     Adjust cap
                   </Link>
@@ -945,7 +971,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   href={`/deck/${deck.id}`}
                   className={cn(
                     'px-5 py-2 rounded-xl text-sm transition',
-                    showTuningLink
+                    (showTuningLink || showContinueAhead)
                       ? 'text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] border border-white/[0.06]'
                       : 'btn-gradient',
                   )}

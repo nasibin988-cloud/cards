@@ -1075,8 +1075,24 @@ export async function decksByPath(path: string): Promise<Deck[]> {
  * a card is admitted only if every relevant deck (its own and any ancestor
  * also in scope) still has headroom under its effective cap.
  */
-export async function getNextCardForStudy(deckId: string | string[], at: Date = new Date()): Promise<Card | undefined> {
+/**
+ * Picker options. `force: true` is the "Continue ahead anyway" escape
+ * hatch surfaced in the Reviewer's empty-state — pulls learning cards
+ * even when their step hasn't elapsed yet, and ignores the daily new /
+ * review caps. Useful when the user wants to keep going past the system's
+ * recommended pacing (cramming, end-of-day cleanup, etc).
+ */
+export interface PickerOptions {
+  force?: boolean;
+}
+
+export async function getNextCardForStudy(
+  deckId: string | string[],
+  at: Date = new Date(),
+  opts: PickerOptions = {},
+): Promise<Card | undefined> {
   const nowMs = at.getTime();
+  const force = opts.force === true;
   const ids = Array.isArray(deckId) ? deckId : [deckId];
   const queryByState = (state: 'learning' | 'relearning' | 'review' | 'new') =>
     ids.length === 1
@@ -1084,20 +1100,34 @@ export async function getNextCardForStudy(deckId: string | string[], at: Date = 
       : db().cards.where('[deckId+state]').anyOf(ids.map(d => [d, state] as [string, string]));
 
   // Learning/relearning steps bypass caps (Anki convention) — they're
-  // mid-flight, not new introductions or full reviews.
-  const learning = await queryByState('learning')
-    .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
-    .first();
+  // mid-flight, not new introductions or full reviews. In force mode
+  // we drop the `due <= now` gate too so the user can grind through
+  // pending learning steps before they would naturally come up.
+  const learning = force
+    ? (await queryByState('learning')
+        .filter(c => !c.suspended && !c.buried)
+        .sortBy('due'))[0]
+    : await queryByState('learning')
+        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+        .first();
   if (learning) return learning;
 
-  const relearning = await queryByState('relearning')
-    .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
-    .first();
+  const relearning = force
+    ? (await queryByState('relearning')
+        .filter(c => !c.suspended && !c.buried)
+        .sortBy('due'))[0]
+    : await queryByState('relearning')
+        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+        .first();
   if (relearning) return relearning;
 
-  const review = await queryByState('review')
-    .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
-    .sortBy('due');
+  const review = force
+    ? await queryByState('review')
+        .filter(c => !c.suspended && !c.buried)
+        .sortBy('due')
+    : await queryByState('review')
+        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+        .sortBy('due');
 
   const newCards = await queryByState('new')
     .filter(c => !c.suspended && !c.buried)
@@ -1105,14 +1135,18 @@ export async function getNextCardForStudy(deckId: string | string[], at: Date = 
 
   // Build the cap context exactly once for the whole pick. `cardAllowedByCapsSync`
   // then runs as a Map lookup — orders of magnitude faster than the
-  // per-candidate version when the candidate pool is large.
-  const ctx = (review.length > 0 || newCards.length > 0)
+  // per-candidate version when the candidate pool is large. In force
+  // mode we skip cap construction entirely; every card is allowed.
+  const ctx = (!force && (review.length > 0 || newCards.length > 0))
     ? await buildCapContext(ids, at)
     : null;
 
-  if (ctx) {
-    for (const c of review) {
-      if (cardAllowedByCapsSync(c, ctx)) return c;
+  if (review.length > 0) {
+    if (force) return review[0];
+    if (ctx) {
+      for (const c of review) {
+        if (cardAllowedByCapsSync(c, ctx)) return c;
+      }
     }
   }
 
@@ -1125,7 +1159,7 @@ export async function getNextCardForStudy(deckId: string | string[], at: Date = 
         ? shuffle(newCards)
         : newCards; // 'added' = ASC by createdAt, already sorted.
     for (const c of ordered) {
-      if (ctx === null || cardAllowedByCapsSync(c, ctx)) return c;
+      if (force || ctx === null || cardAllowedByCapsSync(c, ctx)) return c;
     }
   }
 
@@ -1151,39 +1185,56 @@ export async function peekNextCardForStudy(
   deckId: string | string[],
   excludeCardId: string,
   at: Date = new Date(),
+  opts: PickerOptions = {},
 ): Promise<Card | undefined> {
   const nowMs = at.getTime();
+  const force = opts.force === true;
   const ids = Array.isArray(deckId) ? deckId : [deckId];
   const queryByState = (state: 'learning' | 'relearning' | 'review' | 'new') =>
     ids.length === 1
       ? db().cards.where('[deckId+state]').equals([ids[0], state] as [string, string])
       : db().cards.where('[deckId+state]').anyOf(ids.map(d => [d, state] as [string, string]));
 
-  const learning = await queryByState('learning')
-    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
-    .first();
+  const learning = force
+    ? (await queryByState('learning')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+        .sortBy('due'))[0]
+    : await queryByState('learning')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+        .first();
   if (learning) return learning;
 
-  const relearning = await queryByState('relearning')
-    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
-    .first();
+  const relearning = force
+    ? (await queryByState('relearning')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+        .sortBy('due'))[0]
+    : await queryByState('relearning')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+        .first();
   if (relearning) return relearning;
 
-  const review = await queryByState('review')
-    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
-    .sortBy('due');
+  const review = force
+    ? await queryByState('review')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+        .sortBy('due')
+    : await queryByState('review')
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+        .sortBy('due');
 
   const newCards = await queryByState('new')
     .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
     .sortBy('createdAt');
 
-  const ctx = (review.length > 0 || newCards.length > 0)
+  const ctx = (!force && (review.length > 0 || newCards.length > 0))
     ? await buildCapContext(ids, at)
     : null;
 
-  if (ctx) {
-    for (const c of review) {
-      if (cardAllowedByCapsSync(c, ctx)) return c;
+  if (review.length > 0) {
+    if (force) return review[0];
+    if (ctx) {
+      for (const c of review) {
+        if (cardAllowedByCapsSync(c, ctx)) return c;
+      }
     }
   }
 
@@ -1196,7 +1247,7 @@ export async function peekNextCardForStudy(
         ? shuffle(newCards)
         : newCards;
     for (const c of ordered) {
-      if (ctx === null || cardAllowedByCapsSync(c, ctx)) return c;
+      if (force || ctx === null || cardAllowedByCapsSync(c, ctx)) return c;
     }
   }
   return undefined;
