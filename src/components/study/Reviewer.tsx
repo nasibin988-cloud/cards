@@ -114,7 +114,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const historyRef = useRef<UndoEntry[]>([]);
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
-  const pomodoro = usePomodoro();
+  // deck.id keys the persisted pomodoro state so navigating across
+  // decks always resets, but a same-deck round-trip (e.g. opening
+  // the note editor) restores the timer where it was.
+  const pomodoro = usePomodoro(virtualScope ? `path:${virtualScope.label}` : deck.id);
   const inBreak = pomodoro.enabled && pomodoro.phase === 'break';
   const [hint, setHint] = useState<string | null>(null);
   const [hintLoading, setHintLoading] = useState(false);
@@ -624,7 +627,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         return;
       }
       if (e.key === 'e' || e.key === 'E') {
-        if (note) router.push(`/note/${note.id}`);
+        if (note) router.push(`/note/${note.id}?from=study`);
         return;
       }
       // T = Teach back (Feynman mode). Only meaningful from the front

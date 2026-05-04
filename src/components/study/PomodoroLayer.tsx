@@ -37,16 +37,62 @@ export interface PomodoroState {
   skipPhase: () => void;
 }
 
-export function usePomodoro(): PomodoroState {
+/**
+ * sessionStorage key for the in-flight pomodoro phase. SessionStorage is
+ * ideal here: persists across same-tab navigations (Reviewer → note edit
+ * → Reviewer round-trip preserves the timer) but clears on tab close so
+ * a brand-new browsing session always starts fresh.
+ *
+ * Scoped by deckKey so navigating to a different deck doesn't restore a
+ * stale state from another deck's session.
+ */
+const POMO_STORAGE_KEY = 'cards:pomodoro:state';
+
+interface PersistedPomo {
+  deckKey: string;
+  phase: PomodoroPhase;
+  phaseStart: number;
+}
+
+function loadPersistedPomo(deckKey: string): PersistedPomo | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(POMO_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedPomo;
+    if (parsed.deckKey !== deckKey) return null;
+    if (parsed.phase !== 'work' && parsed.phase !== 'break') return null;
+    if (typeof parsed.phaseStart !== 'number') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedPomo(deckKey: string, phase: PomodoroPhase, phaseStart: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(POMO_STORAGE_KEY, JSON.stringify({ deckKey, phase, phaseStart }));
+  } catch { /* private mode / quota — ignore */ }
+}
+
+export function usePomodoro(deckKey: string): PomodoroState {
   const [enabled, setEnabled] = useState(false);
   const [workMinutes, setWorkMinutes] = useState(25);
   const [breakMinutes, setBreakMinutes] = useState(5);
-  const [phase, setPhase] = useState<PomodoroPhase>('work');
-  const [phaseStart, setPhaseStart] = useState<number>(() => Date.now());
+  const [phase, setPhase] = useState<PomodoroPhase>(() => {
+    return loadPersistedPomo(deckKey)?.phase ?? 'work';
+  });
+  const [phaseStart, setPhaseStart] = useState<number>(() => {
+    return loadPersistedPomo(deckKey)?.phaseStart ?? Date.now();
+  });
   const loadedRef = useRef(false);
 
   // One-shot config load. Settings live in IndexedDB so the read is async;
   // we don't want the timer to start until we know whether to run at all.
+  // Phase + phaseStart are seeded from sessionStorage above so a session
+  // round-trip (e.g. opening the note editor and coming back) doesn't
+  // reset the timer.
   useEffect(() => {
     (async () => {
       const [pe, pw, pb] = await Promise.all([
@@ -57,10 +103,23 @@ export function usePomodoro(): PomodoroState {
       setEnabled(pe);
       setWorkMinutes(Math.max(1, pw));
       setBreakMinutes(Math.max(1, pb));
-      setPhaseStart(Date.now());
+      // If nothing was persisted, anchor phaseStart now (first time we
+      // know the user has the feature on). If we did restore from
+      // sessionStorage, leave phaseStart as-is so elapsed time
+      // continues to count from the original boundary.
+      if (!loadPersistedPomo(deckKey)) {
+        setPhaseStart(Date.now());
+      }
       loadedRef.current = true;
     })();
-  }, []);
+  }, [deckKey]);
+
+  // Persist on every phase change so a navigation away can pick up
+  // exactly where we left off.
+  useEffect(() => {
+    if (!enabled) return;
+    savePersistedPomo(deckKey, phase, phaseStart);
+  }, [enabled, deckKey, phase, phaseStart]);
 
   // Phase transition timer. setTimeout-based so a single missed wake-up
   // doesn't accumulate drift; remaining = configured - elapsed every
