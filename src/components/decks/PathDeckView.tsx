@@ -169,7 +169,7 @@ export default function PathDeckView({ path }: { path: string }) {
                   ) : childDue === 0 ? (
                     <>
                       <span /><span />
-                      <span className="text-right text-dark-600">done</span>
+                      <span className="text-right text-dark-600">Done!</span>
                     </>
                   ) : (
                     <>

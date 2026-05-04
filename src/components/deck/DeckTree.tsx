@@ -489,7 +489,7 @@ function CountChips({ sum, due, dim }: { sum: SummedCounts; due: number; dim?: b
       <div className={cls}>
         <span />
         <span />
-        <span className="text-right text-dark-600">done</span>
+        <span className="text-right text-dark-600">Done!</span>
       </div>
     );
   }
