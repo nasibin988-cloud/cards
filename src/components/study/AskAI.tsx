@@ -35,8 +35,36 @@ type UiMessage =
       results: ImageHit[];
     };
 
+/**
+ * sessionStorage carries the conversation across same-tab navigations
+ * (e.g. mid-study `E` → edit → save → back to /study) so the user
+ * doesn't lose the AskAI thread they were building. SessionStorage is
+ * the right scope: clears on tab close, persists through navigations.
+ */
+const ASKAI_STORAGE_KEY = 'cards:askai:messages';
+
+function loadPersistedMessages(): UiMessage[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = sessionStorage.getItem(ASKAI_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedMessages(msgs: UiMessage[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (msgs.length === 0) sessionStorage.removeItem(ASKAI_STORAGE_KEY);
+    else sessionStorage.setItem(ASKAI_STORAGE_KEY, JSON.stringify(msgs));
+  } catch { /* private mode / quota — ignore */ }
+}
+
 export default function AskAI({ open, onClose, note, card }: Props) {
-  const [messages, setMessages] = useState<UiMessage[]>([]);
+  const [messages, setMessages] = useState<UiMessage[]>(() => loadPersistedMessages());
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [hasKey, setHasKey] = useState<boolean | null>(null);
@@ -85,6 +113,15 @@ export default function AskAI({ open, onClose, note, card }: Props) {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, streaming]);
+
+  // Persist the conversation so a same-tab round-trip (mid-study edit →
+  // save → back to /study) doesn't reset the thread. We skip persisting
+  // mid-stream so the in-progress assistant chunk doesn't get cached as a
+  // stale half-message.
+  useEffect(() => {
+    if (streaming) return;
+    savePersistedMessages(messages);
   }, [messages, streaming]);
 
   const send = async () => {
@@ -179,6 +216,7 @@ export default function AskAI({ open, onClose, note, card }: Props) {
     setMessages([]);
     setInput('');
     lastCardIdRef.current = card.id;
+    savePersistedMessages([]);
   };
 
   const acceptSlash = (cmd: SlashCommand) => {
