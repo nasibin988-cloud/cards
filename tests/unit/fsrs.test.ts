@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyRating,
+  dayCutoffDue,
   emptyCard,
   previewIntervals,
 } from '@/lib/fsrs/scheduler';
@@ -100,6 +101,42 @@ describe('FSRS wrapper', () => {
       expect(log.cardId).toBe(card.id);
       expect(log.deckId).toBe(card.deckId);
       expect(typeof log.review).toBe('number');
+    });
+  });
+
+  describe('dayCutoffDue', () => {
+    it('anchors a 1-day interval to the next midnight (cutoff=0)', () => {
+      // Friday 8 PM → Saturday 12:00 AM, cutoff 0.
+      const friday8pm = new Date(2026, 4, 1, 20, 30, 15).getTime();
+      const due = dayCutoffDue(friday8pm, 1, 0);
+      const dt = new Date(due);
+      expect(dt.getHours()).toBe(0);
+      expect(dt.getMinutes()).toBe(0);
+      expect(dt.getDate()).toBe(2);
+    });
+
+    it('produces the same answer regardless of time-of-day on rate-day', () => {
+      const friday1am = new Date(2026, 4, 1, 1, 0, 0).getTime();
+      const friday11pm = new Date(2026, 4, 1, 23, 0, 0).getTime();
+      expect(dayCutoffDue(friday1am, 1, 0)).toBe(dayCutoffDue(friday11pm, 1, 0));
+    });
+
+    it('multi-day intervals walk N calendar days forward', () => {
+      const fri = new Date(2026, 4, 1, 20, 0, 0).getTime();
+      const due = dayCutoffDue(fri, 5, 0);
+      const dt = new Date(due);
+      expect(dt.getDate()).toBe(6); // Friday + 5d = Wed
+      expect(dt.getHours()).toBe(0);
+    });
+
+    it('with cutoff=4, a 2 AM rate is still considered yesterday', () => {
+      // Friday 2 AM with cutoff 4 → Friday's "day" started Thursday 4 AM.
+      // 1-day interval should land at Friday 4 AM, not Saturday 4 AM.
+      const fri2am = new Date(2026, 4, 1, 2, 0, 0).getTime();
+      const due = dayCutoffDue(fri2am, 1, 4);
+      const dt = new Date(due);
+      expect(dt.getDate()).toBe(1); // Friday
+      expect(dt.getHours()).toBe(4);
     });
   });
 });

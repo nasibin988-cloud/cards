@@ -1587,6 +1587,62 @@ export async function unburyCard(cardId: string): Promise<void> {
   await db().cards.update(cardId, { buried: false, buriedUntil: undefined, modifiedAt: now() });
 }
 
+/**
+ * Re-anchor every multi-day-interval card's `due` to the next day-cutoff
+ * after `lastReview + scheduledDays`. Idempotent: running it twice on
+ * the same data yields the same result. Skips:
+ *   - cards without a lastReview (never been graded)
+ *   - cards whose scheduledDays < 1 (sub-day learning steps stay
+ *     wall-clock — the whole point is to keep "see it in 10 minutes"
+ *     meaning ten actual minutes)
+ *   - suspended cards (no point rescheduling something the user
+ *     deliberately parked)
+ *
+ * Returns how many rows were touched so the UI can confirm.
+ */
+export async function recomputeDueWithDayCutoff(dayStartHour: number): Promise<{ updated: number; total: number }> {
+  if (!Number.isFinite(dayStartHour) || dayStartHour < 0 || dayStartHour > 23) {
+    throw new Error('dayStartHour must be 0..23');
+  }
+  const dbi = db();
+  const all = await dbi.cards.toArray();
+  let total = 0;
+  let updated = 0;
+  const t = now();
+  const patches: Card[] = [];
+  for (const c of all) {
+    if (c.suspended) continue;
+    if (typeof c.lastReview !== 'number') continue;
+    if (typeof c.scheduledDays !== 'number' || c.scheduledDays < 1) continue;
+    total++;
+    const nextDue = computeDayCutoffDue(c.lastReview, c.scheduledDays, dayStartHour);
+    if (nextDue !== c.due) {
+      patches.push({ ...c, due: nextDue, modifiedAt: t });
+      updated++;
+    }
+  }
+  if (patches.length > 0) {
+    await dbi.cards.bulkPut(patches);
+  }
+  return { updated, total };
+}
+
+/**
+ * Local computation of the day-cutoff due timestamp; mirror of
+ * `dayCutoffDue` in lib/fsrs/scheduler.ts. Duplicated here so the
+ * migration helper doesn't pull the FSRS module just to reach a 4-line
+ * date-arithmetic function.
+ */
+function computeDayCutoffDue(lastReview: number, scheduledDays: number, dayStartHour: number): number {
+  const dt = new Date(lastReview);
+  if (dt.getHours() < dayStartHour) {
+    dt.setDate(dt.getDate() - 1);
+  }
+  dt.setHours(dayStartHour, 0, 0, 0);
+  dt.setDate(dt.getDate() + scheduledDays);
+  return dt.getTime();
+}
+
 /** Send a card back to a 'new' state, wiping FSRS history. */
 export async function resetCardProgress(cardId: string): Promise<void> {
   const card = await db().cards.get(cardId);

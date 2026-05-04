@@ -267,7 +267,16 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   // that chain on demand. Keep small and side-effect-free so the prefetch
   // path can call it without coordinating state.
   const effectiveOptsFor = useCallback(async (deckIdOfCard: string): Promise<SchedulerOptions> => {
-    const eff = await getEffectiveDeckSettings(deckIdOfCard);
+    const [eff, dayStartHourRaw] = await Promise.all([
+      getEffectiveDeckSettings(deckIdOfCard),
+      getJsonSetting<number | null>('day_start_hour', null),
+    ]);
+    // Accept 0..23. null/missing leaves the legacy 24h-from-rate behaviour
+    // in place so users who haven't opted in get no surprise change.
+    const dayStartHour = (typeof dayStartHourRaw === 'number'
+      && Number.isFinite(dayStartHourRaw)
+      && dayStartHourRaw >= 0 && dayStartHourRaw <= 23)
+      ? dayStartHourRaw : undefined;
     return {
       retention: eff.desiredRetention.value,
       maxInterval: eff.maxInterval.value,
@@ -275,6 +284,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       // uses its DEFAULT_W. We can't pass an empty array — fsrs treats that
       // as "weight vector of length 0" and crashes.
       w: eff.fsrsParams.value.length > 0 ? eff.fsrsParams.value : undefined,
+      dayStartHour,
     };
   }, []);
 

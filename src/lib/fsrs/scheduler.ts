@@ -97,6 +97,46 @@ export interface SchedulerOptions {
    * Hard cap by `maxInterval` is preserved.
    */
   intervalMultiplier?: number;
+  /**
+   * Hour of the local day (0–23) at which the calendar day "rolls over"
+   * for scheduling purposes. When set, multi-day intervals are anchored
+   * to this cutoff: a card rated Friday with a 1-day interval becomes
+   * due at Saturday's cutoff (e.g. 12:01 AM) rather than 24h after the
+   * exact rate-time. Sub-day intervals (learning steps) are unaffected.
+   * Default behaviour (when undefined) is the legacy 24h-from-rate.
+   */
+  dayStartHour?: number;
+}
+
+/**
+ * Compute the "day-cutoff" due timestamp for a card scheduled `scheduledDays`
+ * full days from `lastReview`, anchored to a local-time cutoff. The result
+ * is the cutoff moment that starts the day on which the card is meant to
+ * be reviewable.
+ *
+ * Examples (dayStartHour=0):
+ *   lastReview = Fri 8 PM, scheduledDays = 1 → Sat 12:00 AM
+ *   lastReview = Fri 1 AM, scheduledDays = 1 → Sat 12:00 AM
+ *   lastReview = Fri 8 PM, scheduledDays = 5 → Wed 12:00 AM
+ *
+ * With dayStartHour=4 (Anki-style "the day starts at 4 AM"), a 2 AM Friday
+ * rate is still considered Thursday's day, so a 1d interval lands at
+ * Friday 4 AM rather than Saturday.
+ */
+export function dayCutoffDue(
+  lastReview: number,
+  scheduledDays: number,
+  dayStartHour: number,
+): number {
+  const dt = new Date(lastReview);
+  // If we rated before today's cutoff we're still inside yesterday's
+  // "day"; back up one calendar day so the cutoff anchor is correct.
+  if (dt.getHours() < dayStartHour) {
+    dt.setDate(dt.getDate() - 1);
+  }
+  dt.setHours(dayStartHour, 0, 0, 0);
+  dt.setDate(dt.getDate() + scheduledDays);
+  return dt.getTime();
 }
 
 function makeFsrs(opts: SchedulerOptions = {}) {
@@ -128,8 +168,13 @@ export function previewIntervals(
     const item = preview[ratingToGrade(rating)];
     if (!item) continue;
     const card = item.card;
-    const dueMs = card.due.getTime();
     const scheduledDays = card.scheduled_days;
+    // Apply the day-cutoff override so the rating-button label matches
+    // what the actual recordReview would store. Sub-day intervals
+    // (learning steps) bypass — they're meant to be wall-clock.
+    const dueMs = (opts.dayStartHour !== undefined && scheduledDays >= 1)
+      ? dayCutoffDue(now.getTime(), scheduledDays, opts.dayStartHour)
+      : card.due.getTime();
     const days = (dueMs - now.getTime()) / 86_400_000;
     result.push({
       rating,
@@ -163,6 +208,19 @@ export function applyRating(
     const widened = Math.min(cap, Math.round(partial.scheduledDays * mult));
     partial.scheduledDays = widened;
     partial.due = now.getTime() + widened * 86_400_000;
+  }
+
+  // Calendar-day override: any multi-day interval becomes due at the
+  // configured day-cutoff rather than 24h-times-N from rate-time. So a
+  // 1d card rated Friday at 8 PM is reviewable from Saturday's cutoff
+  // (e.g. 12:01 AM) instead of Saturday 8 PM. Sub-day intervals are
+  // unaffected so learning steps (10 min, 1 hr) still mean wall-clock.
+  if (
+    opts.dayStartHour !== undefined
+    && partial.scheduledDays !== undefined
+    && partial.scheduledDays >= 1
+  ) {
+    partial.due = dayCutoffDue(now.getTime(), partial.scheduledDays, opts.dayStartHour);
   }
 
   return {

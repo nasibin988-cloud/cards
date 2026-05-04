@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getSetting, setSetting } from '@/lib/db/queries';
+import { getSetting, setSetting, recomputeDueWithDayCutoff } from '@/lib/db/queries';
 import { db } from '@/lib/db/dexie';
 import { DEFAULT_MODEL, MODEL_OPTIONS, testApiKey } from '@/lib/ai/claude';
 import { getJsonSetting, setJsonSetting } from '@/lib/db/queries';
@@ -32,6 +32,10 @@ export default function SettingsPage() {
   const [pomodoroEnabled, setPomodoroEnabled] = useState(false);
   const [pomodoroWork, setPomodoroWork] = useState('25');
   const [pomodoroBreak, setPomodoroBreak] = useState('5');
+  const [dayStartHour, setDayStartHour] = useState('0');
+  const [dayStartHourError, setDayStartHourError] = useState<string | null>(null);
+  const [recomputing, setRecomputing] = useState(false);
+  const [recomputeMsg, setRecomputeMsg] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -45,6 +49,7 @@ export default function SettingsPage() {
       const pe = await getJsonSetting<boolean>('pomodoro_enabled', false);
       const pw = await getJsonSetting<number>('pomodoro_work_minutes', 25);
       const pb = await getJsonSetting<number>('pomodoro_break_minutes', 5);
+      const dsh = await getJsonSetting<number | null>('day_start_hour', null);
       if (k) { setKeyDraft(k); setKeyStored(true); }
       if (m) setModel(m);
       if (r) setRetention(r);
@@ -55,6 +60,7 @@ export default function SettingsPage() {
       setPomodoroEnabled(pe);
       setPomodoroWork(String(pw));
       setPomodoroBreak(String(pb));
+      setDayStartHour(typeof dsh === 'number' ? String(dsh) : '0');
       if ('storage' in navigator && 'estimate' in navigator.storage) {
         const e = await navigator.storage.estimate();
         setStorage({ usage: e.usage ?? 0, quota: e.quota ?? 0 });
@@ -87,6 +93,36 @@ export default function SettingsPage() {
     const n = parseFloat(v);
     if (!Number.isFinite(n) || n < 1 || n > 60) return;
     await setJsonSetting('pomodoro_break_minutes', n);
+  };
+
+  const saveDayStartHour = async (v: string) => {
+    setDayStartHour(v);
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 23) {
+      setDayStartHourError('Must be a whole hour 0–23 (0 = midnight, 4 = 4 AM, etc).');
+      return;
+    }
+    setDayStartHourError(null);
+    await setJsonSetting('day_start_hour', n);
+  };
+
+  const runRecomputeDue = async () => {
+    if (recomputing) return;
+    const n = parseInt(dayStartHour, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 23) {
+      setRecomputeMsg('Set a valid day-start hour first.');
+      return;
+    }
+    setRecomputing(true);
+    setRecomputeMsg(null);
+    try {
+      const r = await recomputeDueWithDayCutoff(n);
+      setRecomputeMsg(`Recomputed ${r.updated} of ${r.total} multi-day cards. Sub-day learning steps were left alone.`);
+    } catch (err) {
+      setRecomputeMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRecomputing(false);
+    }
   };
 
   const saveKey = async () => {
@@ -313,6 +349,35 @@ export default function SettingsPage() {
               When a card&rsquo;s lapses cross this number, it&rsquo;s auto-flagged as broken so you see it in the Trouble lane.
             </div>
           )}
+        </label>
+
+        <label className="block mt-5">
+          <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Day-start hour (local time, 0–23)</div>
+          <input
+            value={dayStartHour}
+            onChange={e => saveDayStartHour(e.target.value)}
+            className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+          />
+          {dayStartHourError ? (
+            <div className="text-2xs text-crimson-300 mt-1.5 font-light">{dayStartHourError}</div>
+          ) : (
+            <div className="text-2xs text-dark-500 mt-1.5 font-light">
+              When the calendar day rolls over for scheduling. <span className="text-dark-300">0 = midnight, 4 = 4 AM (Anki default).</span> A 1-day card rated Friday becomes due at this cutoff on Saturday rather than 24 hours after the rate-time. Sub-day learning steps (10 min, 1 hr) stay wall-clock either way.
+            </div>
+          )}
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            <button
+              onClick={runRecomputeDue}
+              disabled={recomputing}
+              className="px-4 py-2 rounded-xl text-sm text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] transition border border-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {recomputing ? 'Recomputing…' : 'Recompute due dates'}
+            </button>
+            <span className="text-2xs text-dark-500 font-light">
+              Re-anchors every multi-day card you&rsquo;ve already studied to the cutoff above. Idempotent — safe to run more than once.
+            </span>
+          </div>
+          {recomputeMsg && <div className="text-2xs text-saffron-300 mt-2 font-light">{recomputeMsg}</div>}
         </label>
 
         <label className="block mt-5">
