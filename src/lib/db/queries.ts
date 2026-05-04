@@ -1077,10 +1077,13 @@ export async function decksByPath(path: string): Promise<Deck[]> {
  */
 /**
  * Picker options. `force: true` is the "Continue ahead anyway" escape
- * hatch surfaced in the Reviewer's empty-state — pulls learning cards
- * even when their step hasn't elapsed yet, and ignores the daily new /
- * review caps. Useful when the user wants to keep going past the system's
- * recommended pacing (cramming, end-of-day cleanup, etc).
+ * hatch surfaced in the Reviewer's empty-state. Behavior:
+ *   - Learning / relearning: drop the `due <= now` gate so cards mid-step
+ *     come up immediately instead of waiting on the timer.
+ *   - New cards: ignore the daily cap so capped pools open back up.
+ *   - Reviews: STILL gated by `due <= now`. The user explicitly asked
+ *     not to be served reviews that are due tomorrow when they're trying
+ *     to grind through learning + new today.
  */
 export interface PickerOptions {
   force?: boolean;
@@ -1121,13 +1124,12 @@ export async function getNextCardForStudy(
         .first();
   if (relearning) return relearning;
 
-  const review = force
-    ? await queryByState('review')
-        .filter(c => !c.suspended && !c.buried)
-        .sortBy('due')
-    : await queryByState('review')
-        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
-        .sortBy('due');
+  // Reviews: keep the due gate even in force mode. The user said
+  // explicitly that they want learning + new to flow, not future
+  // reviews dragged forward.
+  const review = await queryByState('review')
+    .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+    .sortBy('due');
 
   const newCards = await queryByState('new')
     .filter(c => !c.suspended && !c.buried)
@@ -1141,13 +1143,14 @@ export async function getNextCardForStudy(
     ? await buildCapContext(ids, at)
     : null;
 
-  if (review.length > 0) {
-    if (force) return review[0];
-    if (ctx) {
-      for (const c of review) {
-        if (cardAllowedByCapsSync(c, ctx)) return c;
-      }
+  if (ctx) {
+    for (const c of review) {
+      if (cardAllowedByCapsSync(c, ctx)) return c;
     }
+  } else if (force && review.length > 0) {
+    // Force mode skipped cap-context, but reviews here are still
+    // genuinely due (passed the due-gate above) so they're fair game.
+    return review[0];
   }
 
   if (newCards.length > 0) {
@@ -1213,13 +1216,10 @@ export async function peekNextCardForStudy(
         .first();
   if (relearning) return relearning;
 
-  const review = force
-    ? await queryByState('review')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
-        .sortBy('due')
-    : await queryByState('review')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
-        .sortBy('due');
+  // Reviews: due-gated even in force mode (matches getNextCardForStudy).
+  const review = await queryByState('review')
+    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+    .sortBy('due');
 
   const newCards = await queryByState('new')
     .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
@@ -1229,13 +1229,12 @@ export async function peekNextCardForStudy(
     ? await buildCapContext(ids, at)
     : null;
 
-  if (review.length > 0) {
-    if (force) return review[0];
-    if (ctx) {
-      for (const c of review) {
-        if (cardAllowedByCapsSync(c, ctx)) return c;
-      }
+  if (ctx) {
+    for (const c of review) {
+      if (cardAllowedByCapsSync(c, ctx)) return c;
     }
+  } else if (force && review.length > 0) {
+    return review[0];
   }
 
   if (newCards.length > 0) {
