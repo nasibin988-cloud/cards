@@ -119,6 +119,16 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   // the note editor) restores the timer where it was.
   const pomodoro = usePomodoro(virtualScope ? `path:${virtualScope.label}` : deck.id);
   const inBreak = pomodoro.enabled && pomodoro.phase === 'break';
+  /**
+   * Time-on-card accounting for break-aware durations. shownAt anchors
+   * when the current card first hit the screen; this pair of refs tracks
+   * any break window that opened while that card was still active so we
+   * can subtract it from the durationMs we send to recordReview. End
+   * effect: if you sit on a card for 8 min and the middle 5 are pomodoro
+   * break, the review log records 3 min of actual study time, not 8.
+   */
+  const breakElapsedMsRef = useRef(0);
+  const breakStartRef = useRef<number | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [hintLoading, setHintLoading] = useState(false);
   const [lookupOpen, setLookupOpen] = useState(false);
@@ -225,6 +235,28 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   useEffect(() => {
     setHint(null);
   }, [card?.id]);
+
+  // Reset per-card break accounting whenever a fresh card hits the screen.
+  // shownAt is also re-set in fetchNext, so durationMs starts from zero
+  // and the break-elapsed accumulator starts from zero alongside it.
+  useEffect(() => {
+    breakElapsedMsRef.current = 0;
+    breakStartRef.current = null;
+  }, [card?.id]);
+
+  // When the pomodoro phase flips, accumulate break time so we can
+  // subtract it from the next durationMs we hand to recordReview. We
+  // can't just diff `Date.now() - shownAt` at rate-time because the
+  // user may have spent minutes in a break while the card sat on screen.
+  useEffect(() => {
+    if (!pomodoro.enabled) return;
+    if (pomodoro.phase === 'break') {
+      breakStartRef.current = Date.now();
+    } else if (breakStartRef.current !== null) {
+      breakElapsedMsRef.current += Date.now() - breakStartRef.current;
+      breakStartRef.current = null;
+    }
+  }, [pomodoro.phase, pomodoro.enabled]);
 
   const [sessionStartDue, setSessionStartDue] = useState<number | null>(null);
   /**
@@ -439,7 +471,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     async (rating: Rating) => {
       if (inBreak) return;
       if (!card || phase !== 'back') return;
-      const dur = Date.now() - shownAt;
+      // Subtract any break time that elapsed while this card was on
+      // screen so the review-log duration reflects actual study time,
+      // not stand-up-and-stretch time.
+      const dur = Math.max(0, Date.now() - shownAt - breakElapsedMsRef.current);
       const opts = await effectiveOptsFor(card.deckId);
       const { log } = await recordReview(card, rating, dur, opts);
       historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
@@ -1010,7 +1045,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               onCancel={() => setFeynmanOpen(false)}
               onReadyToRate={async ({ rating, multiplier }) => {
                 if (!card) return;
-                const dur = Date.now() - shownAt;
+                const dur = Math.max(0, Date.now() - shownAt - breakElapsedMsRef.current);
                 const opts = await effectiveOptsFor(card.deckId);
                 const { log } = await recordReview(card, rating, dur, {
                   ...opts,
