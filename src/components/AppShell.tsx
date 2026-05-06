@@ -32,7 +32,12 @@ const NAV: NavItem[] = [
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const isStudying = pathname?.startsWith('/study/') ?? false;
+  // Routes that take over the full viewport — no app-nav header. Study
+  // already did this; the phone-remote page wants the same treatment so
+  // its two tap-zones can span the whole screen without an iOS chrome
+  // strip eating thumb space at the top.
+  const isFullViewport = pathname?.startsWith('/study/') || pathname === '/remote' || pathname?.startsWith('/remote/');
+  const isStudying = isFullViewport;
   const [helpOpen, setHelpOpen] = useState(false);
   // Mounted once globally — pulls on app open if behind, debounce-pushes
   // after writes, and flushes on tab hide.

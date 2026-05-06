@@ -32,7 +32,10 @@ export default function RemotePage() {
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [state, setState] = useState<ConnState>('unknown');
   const [lastError, setLastError] = useState<string | null>(null);
-  const [lastAction, setLastAction] = useState<string | null>(null);
+  // Tracked for future reinstatement of the status row (currently the
+  // chromeless layout doesn't display it). Setter calls in send() are
+  // kept so flipping the JSX back on doesn't require re-plumbing.
+  const [, setLastAction] = useState<string | null>(null);
   const [mode, setMode] = useState<ChannelMode>('hub');
 
   const peerRef = useRef<Peer | null>(null);
@@ -225,22 +228,16 @@ export default function RemotePage() {
   }
 
   return (
-    <div className="min-h-[100dvh] flex flex-col px-4 pt-6 pb-[max(env(safe-area-inset-bottom),1rem)] gap-3">
-      <div className="text-center pb-2">
-        <h1 className="text-2xl font-extralight tracking-tight bg-gradient-to-r from-saffron-300 to-persian-300 bg-clip-text text-transparent">
-          Remote
-        </h1>
-        <div className="text-2xs uppercase tracking-widest text-dark-500 font-mono mt-1 flex items-center justify-center gap-2">
-          <span
-            className={cn(
-              'inline-block h-1.5 w-1.5 rounded-full',
-              mode === 'webrtc' ? 'bg-saffron-300 animate-pulse' : 'bg-dark-500',
-            )}
-            aria-label={mode === 'webrtc' ? 'Direct connection' : 'Hub fallback'}
-          />
-          <span>{lastAction ?? (mode === 'webrtc' ? 'direct · ready' : 'hub · ready')}</span>
-        </div>
-      </div>
+    <div className="relative min-h-[100dvh] flex flex-col p-2 pt-[max(env(safe-area-inset-top),0.5rem)] pb-[max(env(safe-area-inset-bottom),0.5rem)] gap-2">
+      {/* Tiny corner status dot — connection mode at a glance, no chrome
+          competing with the buttons. WebRTC = pulsing saffron, hub = grey. */}
+      <span
+        className={cn(
+          'absolute top-2 right-2 h-1.5 w-1.5 rounded-full pointer-events-none z-10',
+          mode === 'webrtc' ? 'bg-saffron-300 animate-pulse' : 'bg-dark-600',
+        )}
+        aria-label={mode === 'webrtc' ? 'Direct connection' : 'Hub fallback'}
+      />
 
       {/*
         Two big dual-purpose tap zones, side by side, filling the
