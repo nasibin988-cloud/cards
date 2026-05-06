@@ -250,8 +250,8 @@ export default function RemotePage() {
         without re-deriving the markup.
       */}
       <div className="flex-1 grid grid-cols-2 gap-3">
-        <BigBtn label="Again" sub="1 · flip" tone="crimson" fill onClick={() => send({ type: 'tap-left' })} />
-        <BigBtn label="Good"  sub="3 · flip" tone="saffron" fill onClick={() => send({ type: 'tap-right' })} />
+        <BigBtn label="AGAIN" sub="1 · flip" tone="crimson" fill onClick={() => send({ type: 'tap-left' })} />
+        <BigBtn label="GOOD"  sub="3 · flip" tone="saffron" fill onClick={() => send({ type: 'tap-right' })} />
       </div>
 
       {/*
