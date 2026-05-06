@@ -22,7 +22,14 @@ export type RemoteAction =
   | { type: 'end-pomodoro-phase' }
   | { type: 'flag-cycle' }
   | { type: 'edit' }
-  | { type: 'ask' };
+  | { type: 'ask' }
+  // ─── WebRTC signaling. Same channel as actions; consumers ignore
+  // these on their normal handler and route them to the signaling
+  // state machine instead. ─────────────────────────────────────────
+  | { type: 'webrtc-offer';  sdp: string }
+  | { type: 'webrtc-answer'; sdp: string }
+  | { type: 'webrtc-ice';    candidate: RTCIceCandidateInit | null }
+  | { type: 'webrtc-bye' };
 
 type Subscriber = (action: RemoteAction) => void;
 

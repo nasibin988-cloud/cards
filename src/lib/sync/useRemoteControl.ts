@@ -4,18 +4,23 @@ import { useEffect, useRef } from 'react';
 import { withBasePath } from '@/lib/basePath';
 import { db } from '@/lib/db/dexie';
 import type { RemoteAction } from './remote-bus';
+import { createResponder, isSignal, type Peer, type SignalEnvelope } from './webrtc-peer';
 
 /**
  * Subscribe to the remote-control SSE stream and dispatch each incoming
- * action to the supplied handler. Reconnects with exponential backoff on
- * transient errors so a brief network blip doesn't kill the channel.
+ * action to the supplied handler. WebRTC is layered on top: we maintain
+ * a peer connection in "responder" mode and, if a phone establishes a
+ * data channel, route incoming actions through it instead. The SSE hub
+ * stays open the whole time as both signaling transport AND fallback
+ * (any DC failure silently degrades to hub-mediated actions, exactly
+ * the pre-WebRTC behavior).
  *
  * Token is read from sync_adapter_config in IndexedDB — same bearer the
  * sync layer uses, so once the user has set up sync the remote works
  * with zero extra credentials.
  *
- * Caller passes a stable handler ref-like object via `handlersRef` so the
- * subscription effect doesn't tear down on every render of the parent.
+ * Caller passes a stable handler ref so the subscription effect doesn't
+ * tear down on every render of the parent.
  */
 
 export interface RemoteHandlers {
@@ -30,6 +35,49 @@ export function useRemoteControl(handlersRef: React.MutableRefObject<RemoteHandl
     let es: EventSource | null = null;
     let backoff = 1_000;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let peer: Peer | null = null;
+    let postUrl: string | null = null;
+    let bearer: string | null = null;
+
+    const sendSignal = async (s: SignalEnvelope) => {
+      if (!postUrl || !bearer) return;
+      try {
+        await fetch(postUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${bearer}`,
+          },
+          body: JSON.stringify(s),
+          keepalive: true,
+        });
+      } catch { /* signaling is best-effort; SSE retries the rest */ }
+    };
+
+    const ensurePeer = (): Peer | null => {
+      if (peer) return peer;
+      peer = createResponder({
+        sendSignal,
+        onMessage: (text) => {
+          try {
+            const action = JSON.parse(text) as RemoteAction;
+            // The data channel only carries user actions, never signaling
+            // (that's still on SSE). But guard anyway.
+            if (!isSignal(action as { type: string })) {
+              handlersRef.current.onAction(action);
+            }
+          } catch { /* malformed payload — ignore */ }
+        },
+        onOpen: () => { /* nothing to do — actions just start flowing */ },
+        onClose: () => {
+          // DC closed → from now on, actions flow over SSE again.
+          // We rebuild the peer on the next inbound offer.
+          peer?.dispose();
+          peer = null;
+        },
+      });
+      return peer;
+    };
 
     const connect = async () => {
       if (stoppedRef.current) return;
@@ -44,17 +92,16 @@ export function useRemoteControl(handlersRef: React.MutableRefObject<RemoteHandl
           const parsed = JSON.parse(cfg.value) as { kind?: string; url?: string; token?: string };
           if (parsed.kind === 'self' && parsed.token) {
             token = parsed.token;
-            // Stream URL is sibling of the snapshot URL.
-            // .../snapshot → .../remote/stream
             const base = (parsed.url ?? '').replace(/\/snapshot(?=$|\?)/, '/remote/stream');
             url = base || `${window.location.origin}${withBasePath('/api/sync/remote/stream')}`;
+            postUrl = (parsed.url ?? '').replace(/\/snapshot(?=$|\?)/, '/remote')
+              || `${window.location.origin}${withBasePath('/api/sync/remote')}`;
+            bearer = parsed.token;
           }
         }
       } catch { /* ignore — token simply unavailable */ }
 
       if (!token || !url) {
-        // Sync isn't configured; nothing to do. Try again later in case
-        // the user finishes setup mid-session.
         timer = setTimeout(connect, 5_000);
         return;
       }
@@ -72,13 +119,17 @@ export function useRemoteControl(handlersRef: React.MutableRefObject<RemoteHandl
         try {
           const data = JSON.parse(ev.data) as RemoteAction | { type: 'hello' };
           if (data.type === 'hello') return;
-          handlersRef.current.onAction(data);
+          if (isSignal(data as { type: string })) {
+            // Route to WebRTC state machine; don't surface to the user-
+            // action handler.
+            const p = ensurePeer();
+            if (p) void p.handleSignal(data as SignalEnvelope);
+          } else {
+            handlersRef.current.onAction(data);
+          }
         } catch { /* malformed payload — ignore */ }
       };
       es.onerror = () => {
-        // EventSource auto-retries internally, but we close + reconnect
-        // ourselves with backoff so a stuck channel doesn't keep
-        // attempting at full speed.
         es?.close();
         es = null;
         if (stoppedRef.current) return;
@@ -93,6 +144,10 @@ export function useRemoteControl(handlersRef: React.MutableRefObject<RemoteHandl
       stoppedRef.current = true;
       if (timer) clearTimeout(timer);
       es?.close();
+      // Critical: dispose the peer so its event listeners don't leak
+      // across page navigations.
+      peer?.dispose();
+      peer = null;
     };
     // handlersRef is intentionally not a dep — it's a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps

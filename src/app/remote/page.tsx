@@ -1,31 +1,44 @@
 'use client';
 
 /**
- * Phone-as-remote-control. Big buttons; each tap POSTs an action to
- * /api/sync/remote, which the laptop's open SSE stream picks up and
- * dispatches into Reviewer. Auth = the same bearer token used by sync.
+ * Phone-as-remote-control. Big buttons; each tap goes to the laptop via
+ * the lowest-latency channel currently available:
  *
- * Latency budget: phone tap → POST round-trip → server publish → SSE
- * push → laptop dispatch. Each leg is one HTTPS keep-alive turn over
- * Hetzner; with the user in California, ~250–300 ms door-to-door is
- * realistic. Most of that is the trans-Atlantic round-trip.
+ *   1. WebRTC RTCDataChannel — when the peer connection has reached
+ *      'connected' (USB tether: ~5 ms; same WiFi: ~30 ms).
+ *   2. SSE+POST hub via Hetzner — when the data channel isn't open yet
+ *      or has failed (~250–300 ms).
+ *
+ * The two paths share the same bearer token. WebRTC signaling rides on
+ * top of the same SSE channel so we don't need any new auth or routes.
+ *
+ * Auth = the bearer token the user already configured for sync; we read
+ * it from IndexedDB on load. No extra credentials to manage.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { db } from '@/lib/db/dexie';
 import { withBasePath } from '@/lib/basePath';
 import type { RemoteAction } from '@/lib/sync/remote-bus';
+import { createInitiator, isSignal, type Peer, type SignalEnvelope } from '@/lib/sync/webrtc-peer';
 import { cn } from '@/lib/utils';
 
 type ConnState = 'unknown' | 'no-config' | 'ready' | 'sending' | 'error';
+type ChannelMode = 'webrtc' | 'hub';
 
 export default function RemotePage() {
   const [token, setToken] = useState<string | null>(null);
   const [postUrl, setPostUrl] = useState<string | null>(null);
+  const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [state, setState] = useState<ConnState>('unknown');
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [mode, setMode] = useState<ChannelMode>('hub');
 
+  const peerRef = useRef<Peer | null>(null);
+  const esRef = useRef<EventSource | null>(null);
+
+  // ── Discover token + endpoints from the user's existing sync config ──
   useEffect(() => {
     (async () => {
       try {
@@ -33,10 +46,13 @@ export default function RemotePage() {
         if (!cfg) { setState('no-config'); return; }
         const parsed = JSON.parse(cfg.value) as { kind?: string; url?: string; token?: string };
         if (parsed.kind !== 'self' || !parsed.token) { setState('no-config'); return; }
-        const url = (parsed.url ?? '').replace(/\/snapshot(?=$|\?)/, '/remote')
+        const post = (parsed.url ?? '').replace(/\/snapshot(?=$|\?)/, '/remote')
           || `${window.location.origin}${withBasePath('/api/sync/remote')}`;
+        const stream = (parsed.url ?? '').replace(/\/snapshot(?=$|\?)/, '/remote/stream')
+          || `${window.location.origin}${withBasePath('/api/sync/remote/stream')}`;
         setToken(parsed.token);
-        setPostUrl(url);
+        setPostUrl(post);
+        setStreamUrl(stream);
         setState('ready');
       } catch {
         setState('no-config');
@@ -44,10 +60,129 @@ export default function RemotePage() {
     })();
   }, []);
 
+  // ── Hub POST (fallback / signaling transport) ────────────────────────
+  const sendViaPost = async (payload: RemoteAction | SignalEnvelope) => {
+    if (!token || !postUrl) return;
+    await fetch(postUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+  };
+
+  // ── SSE: receive WebRTC signaling from the laptop's responder ────────
+  useEffect(() => {
+    if (!streamUrl || !token) return;
+    let stopped = false;
+    let reconnectId: ReturnType<typeof setTimeout> | null = null;
+    let backoff = 1_000;
+
+    const open = () => {
+      if (stopped) return;
+      let es: EventSource;
+      try {
+        es = new EventSource(`${streamUrl}?token=${encodeURIComponent(token)}`);
+      } catch {
+        reconnectId = setTimeout(open, backoff);
+        backoff = Math.min(backoff * 2, 30_000);
+        return;
+      }
+      esRef.current = es;
+      es.onopen = () => { backoff = 1_000; };
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data) as RemoteAction | { type: 'hello' };
+          if (data.type === 'hello') return;
+          if (isSignal(data as { type: string })) {
+            const peer = peerRef.current;
+            if (peer) void peer.handleSignal(data as SignalEnvelope);
+          }
+          // Non-signal actions echoed back to the phone are ignored — the
+          // laptop dispatches them locally.
+        } catch { /* ignore */ }
+      };
+      es.onerror = () => {
+        es.close();
+        esRef.current = null;
+        if (stopped) return;
+        reconnectId = setTimeout(open, backoff);
+        backoff = Math.min(backoff * 2, 30_000);
+      };
+    };
+
+    open();
+
+    return () => {
+      stopped = true;
+      if (reconnectId) clearTimeout(reconnectId);
+      esRef.current?.close();
+      esRef.current = null;
+    };
+  }, [streamUrl, token]);
+
+  // ── WebRTC: phone is the initiator. Build once we have a token. ──────
+  useEffect(() => {
+    if (!token || !postUrl) return;
+    let retryId: ReturnType<typeof setTimeout> | null = null;
+
+    const build = () => {
+      const peer = createInitiator({
+        sendSignal: (s) => { void sendViaPost(s); },
+        onOpen: () => { setMode('webrtc'); },
+        onClose: () => {
+          setMode('hub');
+          // Give the laptop a moment to come back, then retry. We don't
+          // hammer — the SSE hub keeps actions flowing in the meantime.
+          retryId = setTimeout(() => {
+            peerRef.current?.dispose();
+            peerRef.current = null;
+            build();
+          }, 5_000);
+        },
+        onMessage: () => { /* phone doesn't expect messages back — yet */ },
+      });
+      peerRef.current = peer;
+    };
+
+    build();
+
+    return () => {
+      if (retryId) clearTimeout(retryId);
+      peerRef.current?.dispose();
+      peerRef.current = null;
+      setMode('hub');
+    };
+    // sendViaPost depends on postUrl/token already in deps; the ref-style
+    // closure captures whichever values were current at build time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, postUrl]);
+
+  // ── Action send: prefer DC, fall back to POST ────────────────────────
   const send = async (action: RemoteAction) => {
     if (!token || !postUrl) return;
     setState('sending');
     setLastError(null);
+
+    const text = JSON.stringify(action);
+    const peer = peerRef.current;
+    if (peer && peer.isOpen()) {
+      const ok = peer.send(text);
+      if (ok) {
+        setLastAction(`${describe(action)} · webrtc`);
+        setState('ready');
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          navigator.vibrate?.(10);
+        }
+        return;
+      }
+      // peer.send returned false (channel raced into a non-open state) —
+      // fall through to the hub.
+    }
+
     try {
       const r = await fetch(postUrl, {
         method: 'POST',
@@ -55,7 +190,7 @@ export default function RemotePage() {
           'content-type': 'application/json',
           authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(action),
+        body: text,
         keepalive: true,
       });
       if (!r.ok) {
@@ -65,10 +200,8 @@ export default function RemotePage() {
         return;
       }
       const data = (await r.json()) as { delivered: number; listeners: number };
-      setLastAction(`${describe(action)} → ${data.delivered}/${data.listeners}`);
+      setLastAction(`${describe(action)} · hub ${data.delivered}/${data.listeners}`);
       setState('ready');
-      // Tactile feedback so the user knows the tap registered before
-      // the laptop visibly reacts (~250 ms hub round-trip).
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
         navigator.vibrate?.(15);
       }
@@ -97,8 +230,15 @@ export default function RemotePage() {
         <h1 className="text-2xl font-extralight tracking-tight bg-gradient-to-r from-saffron-300 to-persian-300 bg-clip-text text-transparent">
           Remote
         </h1>
-        <div className="text-2xs uppercase tracking-widest text-dark-500 font-mono mt-1">
-          {lastAction ?? 'tap to send'}
+        <div className="text-2xs uppercase tracking-widest text-dark-500 font-mono mt-1 flex items-center justify-center gap-2">
+          <span
+            className={cn(
+              'inline-block h-1.5 w-1.5 rounded-full',
+              mode === 'webrtc' ? 'bg-saffron-300 animate-pulse' : 'bg-dark-500',
+            )}
+            aria-label={mode === 'webrtc' ? 'Direct connection' : 'Hub fallback'}
+          />
+          <span>{lastAction ?? (mode === 'webrtc' ? 'direct · ready' : 'hub · ready')}</span>
         </div>
       </div>
 
@@ -143,6 +283,7 @@ function describe(a: RemoteAction): string {
     case 'flag-cycle': return 'Flag';
     case 'edit': return 'Edit';
     case 'ask': return 'Ask';
+    case 'webrtc-offer': case 'webrtc-answer': case 'webrtc-ice': case 'webrtc-bye': return 'signal';
   }
 }
 

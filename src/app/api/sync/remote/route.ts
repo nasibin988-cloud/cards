@@ -41,6 +41,15 @@ function isAction(x: unknown): x is RemoteAction {
     case 'flag-cycle':
     case 'edit':
     case 'ask':
+    case 'webrtc-bye':
+      return true;
+    case 'webrtc-offer':
+    case 'webrtc-answer':
+      // sdp is the only required field; we don't validate the content
+      // because RTCPeerConnection.setRemoteDescription does that for us.
+      return typeof (a as { sdp?: unknown }).sdp === 'string';
+    case 'webrtc-ice':
+      // candidate may be null (end-of-candidates marker).
       return true;
     default:
       return false;
