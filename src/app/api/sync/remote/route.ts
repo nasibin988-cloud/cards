@@ -41,6 +41,8 @@ function isAction(x: unknown): x is RemoteAction {
     case 'flag-cycle':
     case 'edit':
     case 'ask':
+    case 'tap-left':
+    case 'tap-right':
     case 'webrtc-bye':
       return true;
     case 'webrtc-offer':

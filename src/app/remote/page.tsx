@@ -242,13 +242,33 @@ export default function RemotePage() {
         </div>
       </div>
 
-      <BigBtn label="Reveal" tone="persian" onClick={() => send({ type: 'reveal' })} />
-
-      <div className="grid grid-cols-2 gap-3">
-        <BigBtn label="Again" sub="1" tone="crimson" onClick={() => send({ type: 'rate', rating: 1 })} />
-        <BigBtn label="Good"  sub="3" tone="saffron" onClick={() => send({ type: 'rate', rating: 3 })} />
+      {/*
+        Two big dual-purpose tap zones, side by side, filling the
+        remaining viewport. Tapping either flips the card when the
+        laptop is on the front; once flipped, left rates Again (1) and
+        right rates Good (3). Mirrors the laptop's ←/→ arrow keys.
+        The fuller button set (Reveal as a separate button, Hard/Easy,
+        Undo/Bury/Suspend/etc.) is intentionally retained in the code
+        — see the COMMENTED block below — so it can be restored later
+        without re-deriving the markup.
+      */}
+      <div className="flex-1 grid grid-cols-2 gap-3">
+        <BigBtn label="Again" sub="1 · flip" tone="crimson" fill onClick={() => send({ type: 'tap-left' })} />
+        <BigBtn label="Good"  sub="3 · flip" tone="saffron" fill onClick={() => send({ type: 'tap-right' })} />
       </div>
 
+      {/*
+      // ── Full-feature remote (Reveal + 1-4 + Undo/Bury/etc.). Kept
+      //    for easy restoration; toggle by replacing the simplified
+      //    block above with this one. Same `send()` helper, same
+      //    server endpoints — no other changes needed.
+      <BigBtn label="Reveal" tone="persian" onClick={() => send({ type: 'reveal' })} />
+      <div className="grid grid-cols-2 gap-3">
+        <BigBtn label="Again" sub="1" tone="crimson" onClick={() => send({ type: 'rate', rating: 1 })} />
+        <BigBtn label="Hard"  sub="2" tone="dark"    onClick={() => send({ type: 'rate', rating: 2 })} />
+        <BigBtn label="Good"  sub="3" tone="saffron" onClick={() => send({ type: 'rate', rating: 3 })} />
+        <BigBtn label="Easy"  sub="4" tone="persian" onClick={() => send({ type: 'rate', rating: 4 })} />
+      </div>
       <div className="grid grid-cols-3 gap-2 mt-1">
         <SmallBtn label="Undo"   onClick={() => send({ type: 'undo' })} />
         <SmallBtn label="Bury"   onClick={() => send({ type: 'bury' })} />
@@ -260,6 +280,7 @@ export default function RemotePage() {
         <SmallBtn label="Ask"    onClick={() => send({ type: 'ask' })} />
         <SmallBtn label="Pomo ↷" onClick={() => send({ type: 'end-pomodoro-phase' })} />
       </div>
+      */}
 
       {lastError && (
         <div className="text-2xs text-crimson-300 font-mono break-words text-center mt-1">{lastError}</div>
@@ -281,13 +302,15 @@ function describe(a: RemoteAction): string {
     case 'flag-cycle': return 'Flag';
     case 'edit': return 'Edit';
     case 'ask': return 'Ask';
+    case 'tap-left':  return 'Left';
+    case 'tap-right': return 'Right';
     case 'webrtc-offer': case 'webrtc-answer': case 'webrtc-ice': case 'webrtc-bye': return 'signal';
   }
 }
 
 function BigBtn({
-  label, sub, tone, onClick,
-}: { label: string; sub?: string; tone: 'persian' | 'saffron' | 'crimson' | 'dark'; onClick: () => void }) {
+  label, sub, tone, onClick, fill,
+}: { label: string; sub?: string; tone: 'persian' | 'saffron' | 'crimson' | 'dark'; onClick: () => void; fill?: boolean }) {
   const palette: Record<typeof tone, string> = {
     persian:  'from-persian-700/40  to-persian-900/40  text-persian-100  border-persian-700/40',
     saffron:  'from-saffron-700/40  to-saffron-900/40  text-saffron-100  border-saffron-700/40',
@@ -298,14 +321,20 @@ function BigBtn({
     <button
       onClick={onClick}
       className={cn(
-        'flex-1 min-h-[6rem] rounded-3xl px-6 py-5 text-3xl font-extralight tracking-tight',
+        // `fill` makes the button stretch to fill its grid cell — used
+        // by the two-zone simplified remote so each tap target spans
+        // ~half the viewport. Without `fill` we keep the original
+        // pill-style sizing for the legacy multi-button layout.
+        fill
+          ? 'h-full w-full rounded-3xl px-6 py-5 text-4xl font-extralight tracking-tight flex flex-col items-center justify-center gap-3'
+          : 'flex-1 min-h-[6rem] rounded-3xl px-6 py-5 text-3xl font-extralight tracking-tight',
         'bg-gradient-to-br border backdrop-blur-md',
         'active:scale-[0.97] transition-transform select-none touch-manipulation',
         palette[tone],
       )}
     >
       <div>{label}</div>
-      {sub && <div className="text-xs font-mono opacity-50 mt-1">{sub}</div>}
+      {sub && <div className={cn('font-mono opacity-50', fill ? 'text-sm tracking-widest uppercase' : 'text-xs mt-1')}>{sub}</div>}
     </button>
   );
 }

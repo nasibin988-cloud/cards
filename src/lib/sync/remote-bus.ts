@@ -23,6 +23,12 @@ export type RemoteAction =
   | { type: 'flag-cycle' }
   | { type: 'edit' }
   | { type: 'ask' }
+  // Dual-purpose left/right tap from the simplified phone remote. Laptop
+  // checks its current card phase: front → flip; back → rate Again (left)
+  // or Good (right). Mirrors the arrow-key behaviour on the laptop's
+  // keyboard.
+  | { type: 'tap-left' }
+  | { type: 'tap-right' }
   // ─── WebRTC signaling. Same channel as actions; consumers ignore
   // these on their normal handler and route them to the signaling
   // state machine instead. ─────────────────────────────────────────

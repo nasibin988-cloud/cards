@@ -793,10 +793,15 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
           case 'flag-cycle':            cycleFlag(); return;
           case 'edit':                  if (note) router.push(`/note/${note.id}?from=study`); return;
           case 'ask':                   setAskOpen(true); return;
+          // Dual-purpose: same semantic as the laptop's ←/→ arrow keys.
+          // The phase check happens at dispatch-time so the phone never
+          // needs to know what the laptop is showing.
+          case 'tap-left':              if (phase === 'front') reveal(); else if (phase === 'back') rate(1); return;
+          case 'tap-right':             if (phase === 'front') reveal(); else if (phase === 'back') rate(3); return;
         }
       },
     };
-  }, [reveal, rate, undo, snooze, burry, suspend, pomodoro, cycleFlag, note, router]);
+  }, [reveal, rate, undo, snooze, burry, suspend, pomodoro, cycleFlag, note, router, phase]);
   useRemoteControl(remoteHandlersRef);
 
   return (
