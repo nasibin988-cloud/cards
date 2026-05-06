@@ -246,9 +246,7 @@ export default function RemotePage() {
 
       <div className="grid grid-cols-2 gap-3">
         <BigBtn label="Again" sub="1" tone="crimson" onClick={() => send({ type: 'rate', rating: 1 })} />
-        <BigBtn label="Hard"  sub="2" tone="dark"     onClick={() => send({ type: 'rate', rating: 2 })} />
         <BigBtn label="Good"  sub="3" tone="saffron" onClick={() => send({ type: 'rate', rating: 3 })} />
-        <BigBtn label="Easy"  sub="4" tone="persian" onClick={() => send({ type: 'rate', rating: 4 })} />
       </div>
 
       <div className="grid grid-cols-3 gap-2 mt-1">
