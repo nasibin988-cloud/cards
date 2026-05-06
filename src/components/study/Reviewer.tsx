@@ -39,6 +39,7 @@ import {
   EndWorkButton,
   PomodoroBackdrop,
 } from '@/components/study/PomodoroLayer';
+import { useRemoteControl, type RemoteHandlers } from '@/lib/sync/useRemoteControl';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -771,6 +772,32 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     : (card?.state === 'learning' || card?.state === 'relearning') ? 'learn'
     : card?.state === 'review' ? 'review'
     : null;
+
+  // Remote-control: the phone's /remote page POSTs actions through the
+  // sync server; we subscribe via SSE and dispatch into the same handlers
+  // the keyboard uses. Ref-based so the subscription doesn't tear down on
+  // every render — the inner handler closes over the latest callbacks.
+  const remoteHandlersRef = useRef<RemoteHandlers>({ onAction: () => {} });
+  useEffect(() => {
+    remoteHandlersRef.current = {
+      onAction: (action) => {
+        switch (action.type) {
+          case 'reveal':                reveal(); return;
+          case 'rate':                  rate(action.rating); return;
+          case 'undo':                  undo(); return;
+          case 'snooze-hour':           snooze(60 * 60_000, '1 hour'); return;
+          case 'snooze-day':            snooze(24 * 60 * 60_000, '1 day'); return;
+          case 'bury':                  burry(); return;
+          case 'suspend':               suspend(); return;
+          case 'end-pomodoro-phase':    if (pomodoro.enabled) pomodoro.skipPhase(); return;
+          case 'flag-cycle':            cycleFlag(); return;
+          case 'edit':                  if (note) router.push(`/note/${note.id}?from=study`); return;
+          case 'ask':                   setAskOpen(true); return;
+        }
+      },
+    };
+  }, [reveal, rate, undo, snooze, burry, suspend, pomodoro, cycleFlag, note, router]);
+  useRemoteControl(remoteHandlersRef);
 
   return (
     <div className="min-h-screen flex flex-col">
