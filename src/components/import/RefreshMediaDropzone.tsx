@@ -102,6 +102,14 @@ export default function RefreshMediaDropzone() {
                 <Stat label="Unmatched" value={summary.unmatched} />
                 <Stat label="Image fields rewritten" value={summary.notesUpdatedImage} />
               </div>
+              {(summary.matchedByContent > 0 || summary.matchedByAnkiId > 0) && (
+                <div className="text-2xs text-dark-500 font-light pt-1 text-center">
+                  matched via{' '}
+                  <span className="text-dark-300 font-mono">ankiNoteId</span>: {summary.matchedByAnkiId.toLocaleString()}
+                  {' · '}
+                  <span className="text-dark-300 font-mono">content</span>: {summary.matchedByContent.toLocaleString()}
+                </div>
+              )}
               <div className="grid grid-cols-3 gap-3 pt-1">
                 <Stat label="Media added" value={summary.mediaAdded} />
                 <Stat label="Media replaced" value={summary.mediaReplaced} />

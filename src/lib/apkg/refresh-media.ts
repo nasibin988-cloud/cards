@@ -36,6 +36,17 @@ import type { Media, Note } from '@/lib/db/schema';
 
 const FIELD_SEPARATOR = '\x1f';
 
+/**
+ * Hash a note's content for cross-source matching when ankiNoteId fails
+ * (rebuilt decks issue brand-new ids). front + back + extra is uniquely
+ * identifying for any sane deck. Trim and lowercase so trivial whitespace
+ * differences don't break the match. Mirrors resync-order's strategy.
+ */
+function contentKey(front: string, back: string, extra: string): string {
+  const norm = (s: string) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return `${norm(front)} ${norm(back)} ${norm(extra)}`;
+}
+
 export interface RefreshMediaProgress {
   phase: 'unzipping' | 'reading-sqlite' | 'parsing' | 'media' | 'writing' | 'done' | 'error';
   message: string;
@@ -51,9 +62,14 @@ export interface RefreshMediaSummary {
   ankiNoteCount: number;
   /** Notes already in the local DB at start. */
   appNoteCount: number;
-  /** .apkg notes that matched a local note by ankiNoteId. */
+  /** .apkg notes that resolved to a local note (either path). */
   matched: number;
-  /** .apkg notes whose ankiNoteId wasn't found locally. */
+  /** Of `matched`: matched directly via ankiNoteId. */
+  matchedByAnkiId: number;
+  /** Of `matched`: matched via front+back+extra content hash because
+   *  the rebuilt apkg gave the note a fresh ankiNoteId. */
+  matchedByContent: number;
+  /** .apkg notes that didn't match either way. */
   unmatched: number;
   /** Of the matched notes, how many had a different `image` field and got rewritten. */
   notesUpdatedImage: number;
@@ -125,7 +141,16 @@ export async function refreshMediaFromApkg(
 
   onProgress({ phase: 'parsing', message: 'Reading notes…' });
   const notesRes = sqlite.exec('SELECT id, mid, flds FROM notes');
-  const ankiNotes: Array<{ ankiNoteId: string; mid: string; image: string | undefined }> = [];
+  // Pull each note's ankiNoteId, the new image filename, AND a content
+  // hash so we can fall back to content-based matching when the user
+  // rebuilt the deck (which gives every note a fresh ankiNoteId even
+  // though the front/back text is identical).
+  const ankiNotes: Array<{
+    ankiNoteId: string;
+    mid: string;
+    image: string | undefined;
+    contentKey: string;
+  }> = [];
   if (notesRes.length) {
     for (const row of notesRes[0].values) {
       const [id, mid, flds] = row as [number | bigint, number | bigint, string];
@@ -134,7 +159,12 @@ export async function refreshMediaFromApkg(
       if (!model) continue;
       const fieldValues = String(flds).split(FIELD_SEPARATOR);
       const mapped = mapFields(model, fieldValues);
-      ankiNotes.push({ ankiNoteId, mid: String(mid), image: mapped.image });
+      ankiNotes.push({
+        ankiNoteId,
+        mid: String(mid),
+        image: mapped.image,
+        contentKey: contentKey(mapped.front, mapped.back, mapped.extra ?? ''),
+      });
     }
   }
   sqlite.close();
@@ -183,12 +213,20 @@ export async function refreshMediaFromApkg(
   onProgress({ phase: 'writing', message: 'Comparing & writing…', notesSeen: ankiNotes.length, mediaSeen });
 
   const dbi = db();
-  // Build maps for the writes. ankiNoteId-keyed lookup of local notes,
-  // filename-keyed lookup of existing media.
+  // Build lookup tables. We try ankiNoteId first (cheap, exact); when
+  // that misses (rebuilt deck → new ids), we fall back to a content
+  // hash on front+back+extra. We only consume each local note once,
+  // so a content collision can't double-claim — pick-and-remove from
+  // the by-content map as we go.
   const allLocalNotes = await dbi.notes.toArray();
   const localByAnki = new Map<string, Note>();
+  const localByContent = new Map<string, Note[]>();
   for (const n of allLocalNotes) {
     if (n.ankiNoteId) localByAnki.set(n.ankiNoteId, n);
+    const key = contentKey(n.fields.front, n.fields.back, n.fields.extra ?? '');
+    let bucket = localByContent.get(key);
+    if (!bucket) { bucket = []; localByContent.set(key, bucket); }
+    bucket.push(n);
   }
   const allLocalMedia = await dbi.media.toArray();
   const localByFilename = new Map<string, Media>();
@@ -196,14 +234,26 @@ export async function refreshMediaFromApkg(
 
   // ─── Plan note updates ──────────────────────────────────────────
   const t = Date.now();
-  let matched = 0;
+  let matchedByAnkiId = 0;
+  let matchedByContent = 0;
   let unmatched = 0;
   let notesUpdatedImage = 0;
   const notePatches: Note[] = [];
+  // Avoid mapping two .apkg notes to the same local note via content
+  // collisions — take from each content bucket FIFO.
+  const consumed = new Set<string>();
   for (const an of ankiNotes) {
-    const local = localByAnki.get(an.ankiNoteId);
-    if (!local) { unmatched++; continue; }
-    matched++;
+    let local: Note | undefined = localByAnki.get(an.ankiNoteId);
+    if (local && !consumed.has(local.id)) {
+      matchedByAnkiId++;
+    } else {
+      const bucket = localByContent.get(an.contentKey);
+      const claim = bucket?.find(n => !consumed.has(n.id));
+      if (!claim) { unmatched++; continue; }
+      local = claim;
+      matchedByContent++;
+    }
+    consumed.add(local.id);
     const newImage = an.image ?? '';
     const oldImage = local.fields.image ?? '';
     if (newImage !== oldImage) {
@@ -215,6 +265,7 @@ export async function refreshMediaFromApkg(
       });
     }
   }
+  const matched = matchedByAnkiId + matchedByContent;
 
   // ─── Plan media writes ──────────────────────────────────────────
   let mediaAdded = 0;
@@ -248,6 +299,8 @@ export async function refreshMediaFromApkg(
     ankiNoteCount: ankiNotes.length,
     appNoteCount: allLocalNotes.length,
     matched,
+    matchedByAnkiId,
+    matchedByContent,
     unmatched,
     notesUpdatedImage,
     mediaAdded,
