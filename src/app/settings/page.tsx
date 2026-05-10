@@ -36,6 +36,9 @@ export default function SettingsPage() {
   const [dayStartHourError, setDayStartHourError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
   const [recomputeMsg, setRecomputeMsg] = useState<string | null>(null);
+  const [examDate, setExamDate] = useState('');
+  const [forecastThreshold, setForecastThreshold] = useState('0.6');
+  const [forecastThresholdError, setForecastThresholdError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -50,6 +53,8 @@ export default function SettingsPage() {
       const pw = await getJsonSetting<number>('pomodoro_work_minutes', 25);
       const pb = await getJsonSetting<number>('pomodoro_break_minutes', 5);
       const dsh = await getJsonSetting<number | null>('day_start_hour', null);
+      const ed = await getSetting('exam_date');
+      const ft = await getJsonSetting<number>('forecast_threshold', 0.6);
       if (k) { setKeyDraft(k); setKeyStored(true); }
       if (m) setModel(m);
       if (r) setRetention(r);
@@ -61,6 +66,8 @@ export default function SettingsPage() {
       setPomodoroWork(String(pw));
       setPomodoroBreak(String(pb));
       setDayStartHour(typeof dsh === 'number' ? String(dsh) : '0');
+      if (ed) setExamDate(ed);
+      setForecastThreshold(String(ft));
       if ('storage' in navigator && 'estimate' in navigator.storage) {
         const e = await navigator.storage.estimate();
         setStorage({ usage: e.usage ?? 0, quota: e.quota ?? 0 });
@@ -104,6 +111,27 @@ export default function SettingsPage() {
     }
     setDayStartHourError(null);
     await setJsonSetting('day_start_hour', n);
+  };
+
+  const saveExamDate = async (v: string) => {
+    setExamDate(v);
+    // Empty string clears the setting → the forecast section just hides.
+    if (!v) { await db().settings.delete('exam_date'); return; }
+    // Normalise to YYYY-MM-DD; the <input type="date"> already gives us that,
+    // but be defensive against pasted values.
+    const parsed = new Date(v);
+    if (Number.isNaN(parsed.getTime())) return;
+    await setSetting('exam_date', v);
+  };
+  const saveForecastThreshold = async (v: string) => {
+    setForecastThreshold(v);
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n <= 0 || n >= 1) {
+      setForecastThresholdError('Must be between 0 and 1 (e.g. 0.6 = 60% recall floor).');
+      return;
+    }
+    setForecastThresholdError(null);
+    await setJsonSetting('forecast_threshold', n);
   };
 
   const runRecomputeDue = async () => {
@@ -395,6 +423,39 @@ export default function SettingsPage() {
             </div>
           )}
         </label>
+
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <label className="block">
+            <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Exam date (optional)</div>
+            <input
+              type="date"
+              value={examDate}
+              onChange={e => saveExamDate(e.target.value)}
+              className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono [color-scheme:dark]"
+            />
+            <div className="text-2xs text-dark-500 mt-1.5 font-light">
+              When set, an <span className="text-dark-300">Exam forecast</span> section
+              appears on Stats — predicts your expected recall on this date
+              per-deck and lists cards at risk.
+            </div>
+          </label>
+          <label className="block">
+            <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">At-risk threshold (0.0–1.0)</div>
+            <input
+              value={forecastThreshold}
+              onChange={e => saveForecastThreshold(e.target.value)}
+              className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+            />
+            {forecastThresholdError ? (
+              <div className="text-2xs text-crimson-300 mt-1.5 font-light">{forecastThresholdError}</div>
+            ) : (
+              <div className="text-2xs text-dark-500 mt-1.5 font-light">
+                Cards predicted to be below this recall on exam day are flagged for
+                drilling. 0.6 means &ldquo;below 60%&rdquo;.
+              </div>
+            )}
+          </label>
+        </div>
       </Section>
 
       <Section title="Backups & export" subtitle="Daily local backup + manual export to JSON or .apkg.">

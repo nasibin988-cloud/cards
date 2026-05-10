@@ -20,6 +20,7 @@ import type { Deck, ReviewLog } from '@/lib/db/schema';
 import { Tooltip } from '@/components/ui/Tooltip';
 import MaturityDonut from './MaturityDonut';
 import HourOfWeekHeatmap from './HourOfWeekHeatmap';
+import ExamForecast from './ExamForecast';
 
 interface DueForecast {
   deckId: string;
@@ -105,6 +106,10 @@ export default function StatsView() {
           value={retention ? retention.total.toLocaleString() : '—'}
         />
       </div>
+
+      {/* Renders itself out (null) when no exam_date is configured —
+          zero footprint for users who aren't using the feature. */}
+      <ExamForecast />
 
       {maturity && maturity.total > 0 && (
         <section>
