@@ -339,7 +339,7 @@ export async function importApkg(
  * message. We attempt zstd-decompress first, then JSON-parse, falling back
  * to a structural parse for the protobuf case.
  */
-async function readMediaIndex(zip: JSZip, isV3: boolean): Promise<Record<string, string>> {
+export async function readMediaIndex(zip: JSZip, isV3: boolean): Promise<Record<string, string>> {
   const f = zip.file('media');
   if (!f) return {};
   const raw = new Uint8Array(await f.async('uint8array'));
@@ -457,7 +457,7 @@ function skipField(bytes: Uint8Array, offset: number, wireType: number): number 
   }
 }
 
-function guessMime(filename: string): string {
+export function guessMime(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase();
   switch (ext) {
     case 'png': return 'image/png';
