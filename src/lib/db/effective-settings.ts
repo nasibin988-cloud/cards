@@ -40,8 +40,8 @@ export interface EffectiveDeckSettings {
 }
 
 export const DEFAULT_RETENTION = 0.9;
-export const DEFAULT_NEW_PER_DAY = 20;
-export const DEFAULT_REVIEWS_PER_DAY = 200;
+export const DEFAULT_NEW_PER_DAY = 1000;
+export const DEFAULT_REVIEWS_PER_DAY = 1000;
 export const DEFAULT_MAX_INTERVAL = 36500;
 // FSRS-5 default weight sourcing lives in the scheduler module — we never
 // duplicate the 19-element vector here. Caller-side resolves at scheduler call.
