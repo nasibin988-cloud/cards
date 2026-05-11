@@ -82,6 +82,19 @@ export interface Note {
   /** When set on a basic note, generates one card per sibling instead of one. */
   siblings?: SiblingDef[];
   /**
+   * Opus-generated alternate phrasings of `fields.front`. When non-empty,
+   * the Reviewer rotates through (original, ...phrasings) on each review
+   * — same FSRS state, different wording — so you learn the concept
+   * rather than memorising the exact sentence. Cloze ords are preserved
+   * across all phrasings (enforced at generation time).
+   *
+   * Top-level on Note (not inside `fields`) because `fields` is a
+   * record-of-strings used by many iterating call-sites that assume
+   * `string` values; phrasings are an array and would break that
+   * contract.
+   */
+  phrasings?: string[];
+  /**
    * Original Anki note id from the .apkg this note was imported from. Stored
    * as a string because Anki ids are 64-bit timestamps (overflow JS Number).
    * Lets reset/resync deterministically restore authoring order without the

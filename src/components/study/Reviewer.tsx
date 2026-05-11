@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Card, Deck, Note, NoteFields, Rating } from '@/lib/db/schema';
 import {
@@ -45,6 +45,7 @@ import { improveCardWithAI, type Diagnosis } from '@/lib/ai/improve-card';
 import { generateMnemonic } from '@/lib/ai/mnemonic';
 import { disambiguateCard } from '@/lib/ai/disambiguate';
 import { generateAndStoreLapseHint, getLapseHint, clearLapseHint } from '@/lib/ai/lapse-hint';
+import { generatePhrasings } from '@/lib/ai/phrasings';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -152,6 +153,8 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [busyDisamb, setBusyDisamb] = useState(false);
   const [mnemonicSnapshot, setMnemonicSnapshot] = useState<{ noteId: string; oldMnemonic?: string } | null>(null);
   const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldDisambiguator?: string } | null>(null);
+  const [busyPhrasings, setBusyPhrasings] = useState(false);
+  const [phrasingsSnapshot, setPhrasingsSnapshot] = useState<{ noteId: string; oldPhrasings?: string[] } | null>(null);
   const [lapseHint, setLapseHint] = useState<string | null>(null);
 
   // Drop any refine / mnemonic / disamb state when the NOTE changes.
@@ -164,6 +167,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     setCompareOpen(false);
     setMnemonicSnapshot(null);
     setDisambSnapshot(null);
+    setPhrasingsSnapshot(null);
   }, [note?.id]);
 
   // Lapse hint is still per-card (it diagnoses a specific lapse on a
@@ -764,6 +768,55 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     }
   }, [disambSnapshot, note, busyDisamb]);
 
+  /**
+   * V = generate alternate phrasings. Opus produces 2 paraphrases of
+   * the front (preserving cloze ords); stored on note.fields.phrasings.
+   * The Reviewer's render path rotates between (original, ...phrasings)
+   * based on the card's reps + lapses count, so each review shows a
+   * different wording. Shift+V wipes the phrasings.
+   */
+  const writePhrasings = useCallback(async () => {
+    if (!note || busyPhrasings) return;
+    setBusyPhrasings(true);
+    try {
+      const generated = await generatePhrasings(note);
+      if (generated.length === 0) {
+        showFlash('Opus: no valid phrasings (cloze ords mismatched).');
+        return;
+      }
+      const oldPhrasings = note.phrasings;
+      // Phrasings live on the Note (top-level), not inside fields, so
+      // they don't break the record-of-strings contract `fields` has.
+      await updateNote(note.id, { phrasings: generated });
+      setNote({ ...note, phrasings: generated, modifiedAt: Date.now() });
+      setPhrasingsSnapshot({ noteId: note.id, oldPhrasings });
+      showFlash(`Added ${generated.length} phrasings · Shift+V undoes.`);
+    } catch (err) {
+      showFlash(`Phrasings failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyPhrasings(false);
+    }
+  }, [note, busyPhrasings]);
+
+  const revertPhrasings = useCallback(async () => {
+    if (!note) return;
+    if (busyPhrasings) { showFlash('Generating phrasings… wait for it to finish.'); return; }
+    if (!phrasingsSnapshot || note.id !== phrasingsSnapshot.noteId) {
+      showFlash('Nothing to revert on this card.');
+      return;
+    }
+    const restored = phrasingsSnapshot.oldPhrasings;
+    try {
+      // null tells updateNote to clear; an array replaces.
+      await updateNote(note.id, { phrasings: restored ?? null });
+      setNote({ ...note, phrasings: restored, modifiedAt: Date.now() });
+      setPhrasingsSnapshot(null);
+      showFlash('Phrasings reverted.');
+    } catch (err) {
+      showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [phrasingsSnapshot, note, busyPhrasings]);
+
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
     setHintLoading(true);
@@ -1015,6 +1068,17 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         else void writeDisambiguator();
         return;
       }
+      // V = generate alternate phrasings of the front (anti-rote).
+      // Shift+V wipes them. Same separate-undo principle as the others.
+      if (e.key === 'v' || e.key === 'V' || e.code === 'KeyV') {
+        if (!note) return;
+        // Don't fight Cmd/Ctrl+V (paste) — only fire when no modifier.
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        e.preventDefault();
+        if (e.shiftKey) void revertPhrasings();
+        else void writePhrasings();
+        return;
+      }
       if (e.key === 'u' || e.key === 'U') {
         undo();
         return;
@@ -1044,7 +1108,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator, writePhrasings, revertPhrasings]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1081,6 +1145,24 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     : (card?.state === 'learning' || card?.state === 'relearning') ? 'learn'
     : card?.state === 'review' ? 'review'
     : null;
+
+  /**
+   * If this note has Opus-generated alternate phrasings, swap in one of
+   * them based on the card's reps + lapses count so the user sees a
+   * different wording each time. The deterministic mod gives a smooth
+   * rotation across (original, phrasings[0], phrasings[1], …) and stays
+   * consistent across re-renders of the same review. Falls through to
+   * the original note when there are no phrasings.
+   */
+  const displayedNote = useMemo(() => {
+    if (!note || !card) return note;
+    const ps = note.phrasings;
+    if (!ps || ps.length === 0) return note;
+    const all = [note.fields.front, ...ps];
+    const idx = ((card.reps ?? 0) + (card.lapses ?? 0)) % all.length;
+    if (idx === 0) return note;
+    return { ...note, fields: { ...note.fields, front: all[idx] } };
+  }, [note, card]);
 
   // Remote-control: the phone's /remote page POSTs actions through the
   // sync server; we subscribe via SSE and dispatch into the same handlers
@@ -1473,24 +1555,52 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   }
                 }}
                 className={cn(
-                  'glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
+                  'relative glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
                   phase === 'front' && 'cursor-pointer hover:border-white/[0.10] transition',
                   // Refine / mnemonic / disambiguator share the same
                   // shimmer overlay while Opus is thinking, since the
                   // semantic is the same ("AI is changing this card").
                   // When new content lands, `card-refined-in` does the
                   // soft fade-up + glow.
-                  (refining || busyMnemonic || busyDisamb) && 'card-refining',
+                  (refining || busyMnemonic || busyDisamb || busyPhrasings) && 'card-refining',
                   justRefined && !refining && 'card-refined-in',
                 )}
                 aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
               >
+                {/* Tiny "phrasings rotation" indicator in the top-right
+                    corner — only shown when this note has alternates.
+                    Dots: filled = current phrasing, hollow = others.
+                    Subtle enough not to compete with the card. */}
+                {note?.phrasings && note.phrasings.length > 0 && (() => {
+                  const total = note.phrasings.length + 1;
+                  const idx = ((card.reps ?? 0) + (card.lapses ?? 0)) % total;
+                  return (
+                    <div
+                      className="absolute top-3 right-4 flex items-center gap-1 pointer-events-none"
+                      title={`Phrasing ${idx + 1} of ${total} (V to regenerate, Shift+V to clear)`}
+                      aria-label={`Showing phrasing ${idx + 1} of ${total}`}
+                    >
+                      {Array.from({ length: total }).map((_, i) => (
+                        <span
+                          key={i}
+                          className={cn(
+                            'inline-block h-1 w-1 rounded-full transition-colors',
+                            i === idx ? 'bg-saffron-300' : 'bg-dark-600',
+                          )}
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
                 {/* key bump on (front,back) so the renderer remounts
                     when the underlying fields swap; the CSS entry animation
-                    then plays cleanly against the new text. */}
+                    then plays cleanly against the new text. We pass
+                    `displayedNote` rather than `note` so the phrasings-
+                    rotation hits the front the user sees while the
+                    underlying note (and FSRS state) is unchanged. */}
                 <CardRenderer
-                  key={`${note.fields.front}|${note.fields.back ?? ''}`}
-                  note={note}
+                  key={`${(displayedNote ?? note).fields.front}|${(displayedNote ?? note).fields.back ?? ''}`}
+                  note={displayedNote ?? note}
                   card={card}
                   side={phase}
                   className="w-full"

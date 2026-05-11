@@ -854,6 +854,12 @@ export interface UpdateNoteInput {
    * collapse back to a single card). Omit to leave siblings unchanged.
    */
   siblings?: import('./schema').SiblingDef[];
+  /**
+   * AI-generated alternate phrasings of `fields.front`. Pass an empty
+   * array (or undefined fields if you want to be explicit) to clear.
+   * Omit to leave the existing list unchanged.
+   */
+  phrasings?: string[] | null;
 }
 
 /**
@@ -869,12 +875,19 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
     const newSiblings = patch.siblings !== undefined
       ? (patch.siblings.length ? patch.siblings : undefined)
       : note.siblings;
+    // Phrasings: explicit `null` or `[]` clears; non-empty array
+    // replaces; omitted leaves alone. Keeps the API symmetric with
+    // siblings, which uses the same "pass [] to clear" convention.
+    const newPhrasings = patch.phrasings === undefined
+      ? note.phrasings
+      : (patch.phrasings && patch.phrasings.length > 0 ? patch.phrasings : undefined);
     const updated: Note = {
       ...note,
       fields: newFields,
       tags: patch.tags ?? note.tags,
       tier: patch.tier ?? note.tier,
       siblings: newSiblings,
+      phrasings: newPhrasings,
       modifiedAt: t,
     };
     await db().notes.put(updated);

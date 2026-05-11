@@ -19,6 +19,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { href: '/', label: 'Decks' },
+  { href: '/map', label: 'Map' },
   { href: '/read', label: 'Read' },
   { href: '/import', label: 'Import' },
   { href: '/generate', label: 'Generate' },
