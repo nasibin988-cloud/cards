@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Card, Deck, Note, Rating } from '@/lib/db/schema';
+import type { Card, Deck, Note, NoteFields, Rating } from '@/lib/db/schema';
 import {
   buryCard,
   cycleNoteFlag,
@@ -118,14 +118,32 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
   /**
-   * AI card-refine state. `refining` drives the shimmer/dim overlay
-   * while Opus is thinking; `justRefined` is a transient flag set the
-   * instant the rewrite lands so the new content gets the fade-up +
-   * glow entry animation. The latter clears itself after the animation
-   * duration so a fresh refine on the same card replays cleanly.
+   * AI card-refine state.
+   *
+   *  - `refining`: Opus is thinking → shimmer/dim overlay.
+   *  - `justRefined`: rewrite just committed (used for the brief glow
+   *    after the user keeps the rewrite). Auto-clears.
+   *  - `refineSnapshot`: pre-rewrite NoteFields. Lives independently
+   *    of the Cmd+Z review-undo stack — refines have their OWN undo
+   *    path so a refine never collides with a review action.
+   *  - `compareOpen`: the side-by-side diff view is visible.
+   *
+   * The diff view is the primary undo affordance (Z reverts, K keeps,
+   * Esc keeps). Shift+R also reverts the last refine on the current
+   * note after the diff has been dismissed, so you don't lose the
+   * escape hatch just because you tapped Esc.
    */
   const [refining, setRefining] = useState(false);
   const [justRefined, setJustRefined] = useState(false);
+  const [refineSnapshot, setRefineSnapshot] = useState<{ noteId: string; fields: NoteFields } | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+
+  // Drop any refine state when the card changes — refine-undo is
+  // intentionally scoped to the moment you made the change.
+  useEffect(() => {
+    setRefineSnapshot(null);
+    setCompareOpen(false);
+  }, [card?.id]);
   // deck.id keys the persisted pomodoro state so navigating across
   // decks always resets, but a same-deck round-trip (e.g. opening
   // the note editor) restores the timer where it was.
@@ -541,16 +559,15 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     setRefining(true);
     try {
       const result = await improveCardWithAI(note);
-      // Only commit when Opus says it actually improved something and
-      // the new content meaningfully differs. A no-change return path
-      // still flashes the diagnosis so the user knows their card was
-      // judged clean.
       const changed =
         result.isImprovement
         && (result.newFront !== note.fields.front
           || result.newBack !== (note.fields.back ?? ''));
       if (changed) {
-        const newFields = {
+        // Snapshot the OLD fields BEFORE we commit the rewrite so the
+        // compare view + Shift+R revert can restore the original.
+        const oldFields: NoteFields = { ...note.fields };
+        const newFields: NoteFields = {
           ...note.fields,
           front: result.newFront,
           back: result.newBack,
@@ -558,10 +575,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         };
         await updateNote(note.id, { fields: newFields });
         setNote({ ...note, fields: newFields, modifiedAt: Date.now() });
-        setJustRefined(true);
-        setTimeout(() => setJustRefined(false), 800);
+        setRefineSnapshot({ noteId: note.id, fields: oldFields });
+        setCompareOpen(true);
         const dx = result.diagnoses.filter((d): d is Exclude<Diagnosis, 'OK'> => d !== 'OK').join(', ');
-        showFlash(dx ? `Refined: ${dx.toLowerCase()}.` : 'Refined.');
+        showFlash(dx ? `Refined: ${dx.toLowerCase()} · K keep · Z revert` : 'Refined · K keep · Z revert');
       } else {
         const tag = result.diagnoses.includes('OK') ? 'looks clean' : 'no change';
         showFlash(`Opus: ${tag}.`);
@@ -572,6 +589,37 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       setRefining(false);
     }
   }, [note, refining]);
+
+  /**
+   * Keep the rewrite. Closes the compare view; the snapshot lingers
+   * so Shift+R can still walk it back until the user moves cards.
+   * Fires the brief saffron glow so the user sees "kept" register.
+   */
+  const keepRefine = useCallback(() => {
+    if (!compareOpen) return;
+    setCompareOpen(false);
+    setJustRefined(true);
+    setTimeout(() => setJustRefined(false), 800);
+  }, [compareOpen]);
+
+  /**
+   * Roll back to the snapshotted pre-refine fields. Works from inside
+   * the compare view (Z) OR after it's been dismissed (Shift+R) as
+   * long as we're still on the same note.
+   */
+  const revertRefine = useCallback(async () => {
+    if (!refineSnapshot || !note || note.id !== refineSnapshot.noteId) return;
+    const restored: NoteFields = { ...refineSnapshot.fields };
+    try {
+      await updateNote(note.id, { fields: restored });
+      setNote({ ...note, fields: restored, modifiedAt: Date.now() });
+      setRefineSnapshot(null);
+      setCompareOpen(false);
+      showFlash('Refine reverted.');
+    } catch (err) {
+      showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refineSnapshot, note]);
 
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
@@ -670,6 +718,13 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     const onKey = (e: KeyboardEvent) => {
       // Escape always handled, even from inside form fields.
       if (e.key === 'Escape') {
+        if (compareOpen) {
+          // Default-safe: Escape keeps the rewrite (matches a tap-away
+          // intuition). Use Z to revert explicitly.
+          e.preventDefault();
+          keepRefine();
+          return;
+        }
         if (askOpen) {
           e.preventDefault();
           setAskOpen(false);
@@ -761,14 +816,38 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         }
         return;
       }
-      // R = AI quality pass on the current card (refine in place).
-      // Opus diagnoses leakage / weak-cloze / duplication and rewrites
-      // the card while preserving the cloze-ord count. The
-      // .card-refining / .card-refined-in CSS classes drive the
-      // shimmer + cross-fade so the change reads as intentional.
-      if (e.key === 'r' || e.key === 'R') {
-        if (note) {
+      // K / Z while the side-by-side compare panel is open: keep the
+      // rewrite or roll it back. These hijack the normal review keys
+      // ONLY while the panel is visible — otherwise K/Z fall through
+      // to whatever else they're bound to (currently nothing).
+      if (compareOpen) {
+        if (e.key === 'k' || e.key === 'K') {
           e.preventDefault();
+          keepRefine();
+          return;
+        }
+        if (e.key === 'z' || e.key === 'Z') {
+          // Plain Z (no modifiers) reverts the refine. Cmd+Z further
+          // down stays bound to review undo so the two paths never
+          // collide.
+          if (!e.metaKey && !e.ctrlKey) {
+            e.preventDefault();
+            void revertRefine();
+            return;
+          }
+        }
+      }
+      // R = AI quality pass on the current card (refine in place).
+      // Shift+R = revert the last refine on this card, even after
+      // you've already dismissed the compare panel. Refine-undo is
+      // deliberately separate from Cmd+Z (which stays for reviews)
+      // so the two histories can't trample each other.
+      if (e.key === 'r' || e.key === 'R') {
+        if (!note) return;
+        e.preventDefault();
+        if (e.shiftKey) {
+          void revertRefine();
+        } else {
           refineCard();
         }
         return;
@@ -802,7 +881,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1009,7 +1088,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       </header>
 
       <PomodoroBackdrop phase={pomodoro.phase} phaseStart={pomodoro.phaseStart}>
-      <div className="flex-1 flex flex-col items-center justify-start pt-8 md:pt-16 lg:pt-20 pb-10 px-4 md:px-6 max-w-3xl mx-auto w-full">
+      <div className={cn(
+        'flex-1 flex flex-col items-center justify-start pt-8 md:pt-16 lg:pt-20 pb-10 px-4 md:px-6 mx-auto w-full transition-[max-width] duration-500 ease-out',
+        compareOpen ? 'max-w-5xl' : 'max-w-3xl',
+      )}>
         {inBreak && <BreakOverlay onSkip={pomodoro.skipPhase} />}
 
         {!inBreak && phase === 'loading' && (
@@ -1163,54 +1245,100 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
 
         {!inBreak && !feynmanOpen && (phase === 'front' || phase === 'back') && card && note && (
           <div className="w-full space-y-6">
-            <div
-              role={phase === 'front' ? 'button' : undefined}
-              tabIndex={phase === 'front' ? 0 : undefined}
-              onClick={phase === 'front' ? reveal : undefined}
-              onKeyDown={phase === 'front' ? (e => {
-                if (e.key === ' ' || e.key === 'Enter') {
-                  e.preventDefault();
-                  reveal();
-                }
-              }) : undefined}
-              onDoubleClick={e => {
-                // Double-click any Persian/Arabic-script word → open lookup.
-                const sel = window.getSelection?.()?.toString().trim();
-                if (sel && /[؀-ۿ]/.test(sel)) {
-                  e.preventDefault();
-                  setLookupWord(sel);
-                  setLookupOpen(true);
-                }
-              }}
-              className={cn(
-                'glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
-                phase === 'front' && 'cursor-pointer hover:border-white/[0.10] transition',
-                // Refine animation overlays. While Opus is thinking,
-                // the children dim + the saffron shimmer sweeps across.
-                // When new content lands, `card-refined-in` does the
-                // soft fade-up + glow.
-                refining && 'card-refining',
-                justRefined && !refining && 'card-refined-in',
-              )}
-              aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
-            >
-              {/* key bump on (front,back) so the renderer remounts
-                  when the underlying fields swap; the CSS entry animation
-                  then plays cleanly against the new text. */}
-              <CardRenderer
-                key={`${note.fields.front}|${note.fields.back ?? ''}`}
-                note={note}
-                card={card}
-                side={phase}
-                className="w-full"
-              />
-            </div>
+            {compareOpen && refineSnapshot ? (
+              /* Side-by-side compare. Reuses CardRenderer with a synthetic
+                 note built from the snapshotted pre-refine fields for the
+                 "before" pane. CSS classes (.card-compare-*) handle the
+                 dim + saffron-glow framing + before/after corner labels. */
+              <div>
+                <div className="card-compare-pair">
+                  <div className="card-compare-old glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center">
+                    <CardRenderer
+                      key={`old-${refineSnapshot.fields.front}|${refineSnapshot.fields.back ?? ''}`}
+                      note={{ ...note, fields: refineSnapshot.fields }}
+                      card={card}
+                      side={phase}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="card-compare-new glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center">
+                    <CardRenderer
+                      key={`new-${note.fields.front}|${note.fields.back ?? ''}`}
+                      note={note}
+                      card={card}
+                      side={phase}
+                      className="w-full"
+                    />
+                  </div>
+                </div>
+                <div className="card-compare-actions mt-6">
+                  <button
+                    onClick={() => void revertRefine()}
+                    className="px-5 py-2 rounded-2xl text-sm text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] transition border border-white/[0.06]"
+                  >
+                    Revert <kbd className="ml-1.5 text-2xs text-dark-500 font-mono">Z</kbd>
+                  </button>
+                  <button
+                    onClick={keepRefine}
+                    className="btn-gradient px-7 py-2.5 rounded-2xl text-sm uppercase tracking-[0.2em] font-light"
+                  >
+                    Keep <kbd className="ml-1.5 text-2xs text-white/40 font-mono">K</kbd>
+                  </button>
+                </div>
+                <div className="text-center mt-3 text-2xs uppercase tracking-widest text-dark-500 font-mono">
+                  esc keeps · shift+R undoes later
+                </div>
+              </div>
+            ) : (
+              <div
+                role={phase === 'front' ? 'button' : undefined}
+                tabIndex={phase === 'front' ? 0 : undefined}
+                onClick={phase === 'front' ? reveal : undefined}
+                onKeyDown={phase === 'front' ? (e => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    reveal();
+                  }
+                }) : undefined}
+                onDoubleClick={e => {
+                  // Double-click any Persian/Arabic-script word → open lookup.
+                  const sel = window.getSelection?.()?.toString().trim();
+                  if (sel && /[؀-ۿ]/.test(sel)) {
+                    e.preventDefault();
+                    setLookupWord(sel);
+                    setLookupOpen(true);
+                  }
+                }}
+                className={cn(
+                  'glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
+                  phase === 'front' && 'cursor-pointer hover:border-white/[0.10] transition',
+                  // Refine animation overlays. While Opus is thinking,
+                  // the children dim + the saffron shimmer sweeps across.
+                  // When new content lands, `card-refined-in` does the
+                  // soft fade-up + glow.
+                  refining && 'card-refining',
+                  justRefined && !refining && 'card-refined-in',
+                )}
+                aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
+              >
+                {/* key bump on (front,back) so the renderer remounts
+                    when the underlying fields swap; the CSS entry animation
+                    then plays cleanly against the new text. */}
+                <CardRenderer
+                  key={`${note.fields.front}|${note.fields.back ?? ''}`}
+                  note={note}
+                  card={card}
+                  side={phase}
+                  className="w-full"
+                />
+              </div>
+            )}
 
-            {phase === 'front' && typeMode && (
+            {!compareOpen && phase === 'front' && typeMode && (
               <TypeAnswer note={note} card={card} onRate={rate} />
             )}
 
-            {phase === 'front' && !typeMode && (
+            {!compareOpen && phase === 'front' && !typeMode && (
               <div className="flex justify-center">
                 <button
                   onClick={reveal}
@@ -1221,14 +1349,14 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               </div>
             )}
 
-            {phase === 'front' && hint && (
+            {!compareOpen && phase === 'front' && hint && (
               <div className="glass-card rounded-2xl p-4 max-w-xl mx-auto text-center">
                 <div className="text-2xs uppercase tracking-widest text-saffron-400 mb-1">Hint</div>
                 <div className="text-sm font-light italic text-dark-100">{hint}</div>
               </div>
             )}
 
-            {phase === 'back' && (
+            {!compareOpen && phase === 'back' && (
               confidenceMode
                 ? <ConfidenceButtons intervals={intervals} onRate={rate} />
                 : <RatingButtons intervals={intervals} onRate={rate} />
