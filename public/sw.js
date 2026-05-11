@@ -10,7 +10,7 @@
  *   - bypass /api/*, anthropic.com, and any non-GET request.
  */
 
-const VERSION = 'v6-2026-05-02-sync';
+const VERSION = 'v7-2026-05-10-refine';
 const STATIC_CACHE = `cards-static-${VERSION}`;
 const RUNTIME_CACHE = `cards-runtime-${VERSION}`;
 const IMAGE_CACHE = `cards-images-${VERSION}`;
