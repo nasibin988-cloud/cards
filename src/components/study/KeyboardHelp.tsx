@@ -30,6 +30,7 @@ const STUDY_ROWS: Row[] = [
   { keys: ['A'], description: 'Ask AI about this card' },
   { keys: ['H'], description: 'Hint without revealing (AI)' },
   { keys: ['T'], description: 'Teach back (Feynman mode, AI-graded; widens interval if thorough)' },
+  { keys: ['R'], description: 'Refine card with Opus (auto-fix leakage / weak cloze / duplication)' },
   { keys: ['P'], description: 'Read aloud / stop (TTS — toggle in Settings)' },
   { keys: ['E'], description: 'Edit this note' },
   { keys: ['B'], description: 'Bury until tomorrow' },

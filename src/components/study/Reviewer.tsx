@@ -26,6 +26,7 @@ import {
   suspendCard,
   unburryStaleCards,
   updateDeck,
+  updateNote,
   type DeckCounts,
   type ScopeCapStatus,
   type TodayStudyStats,
@@ -40,6 +41,7 @@ import {
   PomodoroBackdrop,
 } from '@/components/study/PomodoroLayer';
 import { useRemoteControl, type RemoteHandlers } from '@/lib/sync/useRemoteControl';
+import { improveCardWithAI, type Diagnosis } from '@/lib/ai/improve-card';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -115,6 +117,15 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const historyRef = useRef<UndoEntry[]>([]);
   const [typeMode, setTypeMode] = useState(false);
   const [confidenceMode, setConfidenceMode] = useState(false);
+  /**
+   * AI card-refine state. `refining` drives the shimmer/dim overlay
+   * while Opus is thinking; `justRefined` is a transient flag set the
+   * instant the rewrite lands so the new content gets the fade-up +
+   * glow entry animation. The latter clears itself after the animation
+   * duration so a fresh refine on the same card replays cleanly.
+   */
+  const [refining, setRefining] = useState(false);
+  const [justRefined, setJustRefined] = useState(false);
   // deck.id keys the persisted pomodoro state so navigating across
   // decks always resets, but a same-deck round-trip (e.g. opening
   // the note editor) restores the timer where it was.
@@ -518,6 +529,50 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     showFlash(next ? `Flag: ${FLAG_GLYPH[next]} ${FLAG_LABEL[next]}` : 'Flag cleared.');
   }, [note]);
 
+  /**
+   * AI quality pass: ask Opus to diagnose + rewrite the current card
+   * in-place. Stays on the same card with the same phase; cloze-ord
+   * count is enforced server-side so a 3-cloze card can't degrade to
+   * 2. The sleek visual sequence (`refining` → `justRefined`) lives
+   * in CSS — see globals.css `.card-refining` + `.card-refined-in`.
+   */
+  const refineCard = useCallback(async () => {
+    if (!note || refining) return;
+    setRefining(true);
+    try {
+      const result = await improveCardWithAI(note);
+      // Only commit when Opus says it actually improved something and
+      // the new content meaningfully differs. A no-change return path
+      // still flashes the diagnosis so the user knows their card was
+      // judged clean.
+      const changed =
+        result.isImprovement
+        && (result.newFront !== note.fields.front
+          || result.newBack !== (note.fields.back ?? ''));
+      if (changed) {
+        const newFields = {
+          ...note.fields,
+          front: result.newFront,
+          back: result.newBack,
+          ...(result.newExtra !== undefined ? { extra: result.newExtra } : {}),
+        };
+        await updateNote(note.id, { fields: newFields });
+        setNote({ ...note, fields: newFields, modifiedAt: Date.now() });
+        setJustRefined(true);
+        setTimeout(() => setJustRefined(false), 800);
+        const dx = result.diagnoses.filter((d): d is Exclude<Diagnosis, 'OK'> => d !== 'OK').join(', ');
+        showFlash(dx ? `Refined: ${dx.toLowerCase()}.` : 'Refined.');
+      } else {
+        const tag = result.diagnoses.includes('OK') ? 'looks clean' : 'no change';
+        showFlash(`Opus: ${tag}.`);
+      }
+    } catch (err) {
+      showFlash(`Refine failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRefining(false);
+    }
+  }, [note, refining]);
+
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
     setHintLoading(true);
@@ -706,6 +761,18 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         }
         return;
       }
+      // R = AI quality pass on the current card (refine in place).
+      // Opus diagnoses leakage / weak-cloze / duplication and rewrites
+      // the card while preserving the cloze-ord count. The
+      // .card-refining / .card-refined-in CSS classes drive the
+      // shimmer + cross-fade so the change reads as intentional.
+      if (e.key === 'r' || e.key === 'R') {
+        if (note) {
+          e.preventDefault();
+          refineCard();
+        }
+        return;
+      }
       if (e.key === 'u' || e.key === 'U') {
         undo();
         return;
@@ -735,7 +802,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1118,10 +1185,25 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               className={cn(
                 'glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
                 phase === 'front' && 'cursor-pointer hover:border-white/[0.10] transition',
+                // Refine animation overlays. While Opus is thinking,
+                // the children dim + the saffron shimmer sweeps across.
+                // When new content lands, `card-refined-in` does the
+                // soft fade-up + glow.
+                refining && 'card-refining',
+                justRefined && !refining && 'card-refined-in',
               )}
               aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
             >
-              <CardRenderer note={note} card={card} side={phase} className="w-full" />
+              {/* key bump on (front,back) so the renderer remounts
+                  when the underlying fields swap; the CSS entry animation
+                  then plays cleanly against the new text. */}
+              <CardRenderer
+                key={`${note.fields.front}|${note.fields.back ?? ''}`}
+                note={note}
+                card={card}
+                side={phase}
+                className="w-full"
+              />
             </div>
 
             {phase === 'front' && typeMode && (

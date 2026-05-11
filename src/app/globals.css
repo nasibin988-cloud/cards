@@ -386,6 +386,66 @@ input.type-cloze:focus {
   animation: shimmer 1.5s infinite;
 }
 
+/* ─── Card refine (AI quality pass) ────────────────────────────────
+ * Two-stage transition while Opus rewrites a card in-place. Stage 1
+ * (`card-refining`) dims the content + sweeps a saffron shimmer across
+ * the glass to signal "working". Stage 2 (`card-refined-in`) cross-
+ * fades the new content up from the bottom with a brief soft glow so
+ * the change reads as intentional, not jumpy.
+ */
+.card-refining {
+  position: relative;
+  isolation: isolate;
+}
+.card-refining::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(120deg,
+    transparent 0%,
+    transparent 35%,
+    rgba(212, 192, 156, 0.18) 50%,
+    transparent 65%,
+    transparent 100%);
+  background-size: 220% 100%;
+  animation: cardRefineShimmer 1.4s linear infinite;
+  z-index: 1;
+}
+.card-refining > * {
+  opacity: 0.42;
+  filter: blur(0.5px);
+  transition: opacity 250ms ease, filter 250ms ease;
+}
+@keyframes cardRefineShimmer {
+  0%   { background-position: -120% 0; }
+  100% { background-position: 120% 0; }
+}
+
+.card-refined-in {
+  animation: cardRefinedIn 720ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.card-refined-in::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px rgba(212, 192, 156, 0.30),
+    0 0 32px rgba(212, 192, 156, 0.16);
+  animation: cardRefinedGlow 720ms ease-out forwards;
+}
+@keyframes cardRefinedIn {
+  0%   { transform: translateY(6px) scale(0.992); opacity: 0; }
+  100% { transform: translateY(0)   scale(1);     opacity: 1; }
+}
+@keyframes cardRefinedGlow {
+  0%   { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+
 /* ─── Pomodoro phase backdrops ────────────────────────────────────
  * Two ambient backgrounds for the Reviewer's main column. The wrapper
  * is keyed on phaseStart so React remounts on each transition; that
