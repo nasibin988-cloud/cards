@@ -154,14 +154,21 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldBack: string } | null>(null);
   const [lapseHint, setLapseHint] = useState<string | null>(null);
 
-  // Drop any refine / mnemonic / disamb state when the card changes —
-  // these undos are scoped to the moment you made the change.
+  // Drop any refine / mnemonic / disamb state when the NOTE changes.
+  // Scoped to note.id rather than card.id so cloze siblings (same note,
+  // different ord) share the same snapshot — if you press G on c1 then
+  // c2 of the same note, Shift+G on c2 can still revert the mnemonic
+  // (since the field lives on the note, not the card).
   useEffect(() => {
     setRefineSnapshot(null);
     setCompareOpen(false);
     setMnemonicSnapshot(null);
     setDisambSnapshot(null);
-    // Pull the stored lapse hint for this card if there is one.
+  }, [note?.id]);
+
+  // Lapse hint is still per-card (it diagnoses a specific lapse on a
+  // specific cloze ord, not the underlying note).
+  useEffect(() => {
     if (card?.id) setLapseHint(getLapseHint(card.id));
     else setLapseHint(null);
   }, [card?.id]);
@@ -647,7 +654,12 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
    * long as we're still on the same note.
    */
   const revertRefine = useCallback(async () => {
-    if (!refineSnapshot || !note || note.id !== refineSnapshot.noteId) return;
+    if (!note) return;
+    if (refining) { showFlash('Refining… wait for it to finish.'); return; }
+    if (!refineSnapshot || note.id !== refineSnapshot.noteId) {
+      showFlash('Nothing to revert on this card.');
+      return;
+    }
     const restored: NoteFields = { ...refineSnapshot.fields };
     try {
       await updateNote(note.id, { fields: restored });
@@ -658,7 +670,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     } catch (err) {
       showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [refineSnapshot, note]);
+  }, [refineSnapshot, note, refining]);
 
   /**
    * G = generate mnemonic. Opus writes into the note's existing
@@ -688,7 +700,12 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   }, [note, busyMnemonic]);
 
   const revertMnemonic = useCallback(async () => {
-    if (!mnemonicSnapshot || !note || note.id !== mnemonicSnapshot.noteId) return;
+    if (!note) return;
+    if (busyMnemonic) { showFlash('Writing mnemonic… wait for it to finish.'); return; }
+    if (!mnemonicSnapshot || note.id !== mnemonicSnapshot.noteId) {
+      showFlash('Nothing to revert on this card.');
+      return;
+    }
     const restored: NoteFields = { ...note.fields, mnemonic: mnemonicSnapshot.oldMnemonic };
     try {
       await updateNote(note.id, { fields: restored });
@@ -698,7 +715,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     } catch (err) {
       showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [mnemonicSnapshot, note]);
+  }, [mnemonicSnapshot, note, busyMnemonic]);
 
   /**
    * D = disambiguate. Opus picks the most confusable peer card in the
@@ -728,7 +745,12 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   }, [note, busyDisamb]);
 
   const revertDisambiguator = useCallback(async () => {
-    if (!disambSnapshot || !note || note.id !== disambSnapshot.noteId) return;
+    if (!note) return;
+    if (busyDisamb) { showFlash('Disambiguating… wait for it to finish.'); return; }
+    if (!disambSnapshot || note.id !== disambSnapshot.noteId) {
+      showFlash('Nothing to revert on this card.');
+      return;
+    }
     const restored: NoteFields = { ...note.fields, back: disambSnapshot.oldBack };
     try {
       await updateNote(note.id, { fields: restored });
@@ -738,7 +760,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     } catch (err) {
       showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [disambSnapshot, note]);
+  }, [disambSnapshot, note, busyDisamb]);
 
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
@@ -961,7 +983,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       // you've already dismissed the compare panel. Refine-undo is
       // deliberately separate from Cmd+Z (which stays for reviews)
       // so the two histories can't trample each other.
-      if (e.key === 'r' || e.key === 'R') {
+      if (e.key === 'r' || e.key === 'R' || e.code === 'KeyR') {
         if (!note) return;
         e.preventDefault();
         if (e.shiftKey) {
@@ -972,9 +994,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         return;
       }
       // G = generate mnemonic (writes to note.fields.mnemonic). Shift+G
-      // reverts to the prior mnemonic value (or empty). Same
-      // separate-from-Cmd+Z principle as refine.
-      if (e.key === 'g' || e.key === 'G') {
+      // reverts. Matching via e.code as well as e.key guards against
+      // browser/keyboard-layout edge cases where Shift+G might surface
+      // as something other than literal 'G'.
+      if (e.key === 'g' || e.key === 'G' || e.code === 'KeyG') {
         if (!note) return;
         e.preventDefault();
         if (e.shiftKey) void revertMnemonic();
@@ -983,7 +1006,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       }
       // D = disambiguate. Opus picks the most-confusable peer and
       // appends a "distinct from X" line to the back. Shift+D reverts.
-      if (e.key === 'd' || e.key === 'D') {
+      if (e.key === 'd' || e.key === 'D' || e.code === 'KeyD') {
         if (!note) return;
         e.preventDefault();
         if (e.shiftKey) void revertDisambiguator();
