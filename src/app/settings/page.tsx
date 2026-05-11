@@ -32,6 +32,7 @@ export default function SettingsPage() {
   const [pomodoroEnabled, setPomodoroEnabled] = useState(false);
   const [pomodoroWork, setPomodoroWork] = useState('25');
   const [pomodoroBreak, setPomodoroBreak] = useState('5');
+  const [autoHintOnAgain, setAutoHintOnAgain] = useState(false);
   const [dayStartHour, setDayStartHour] = useState('0');
   const [dayStartHourError, setDayStartHourError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
@@ -52,6 +53,7 @@ export default function SettingsPage() {
       const pe = await getJsonSetting<boolean>('pomodoro_enabled', false);
       const pw = await getJsonSetting<number>('pomodoro_work_minutes', 25);
       const pb = await getJsonSetting<number>('pomodoro_break_minutes', 5);
+      const ah = await getJsonSetting<boolean>('auto_hint_on_again', false);
       const dsh = await getJsonSetting<number | null>('day_start_hour', null);
       const ed = await getSetting('exam_date');
       const ft = await getJsonSetting<number>('forecast_threshold', 0.6);
@@ -65,6 +67,7 @@ export default function SettingsPage() {
       setPomodoroEnabled(pe);
       setPomodoroWork(String(pw));
       setPomodoroBreak(String(pb));
+      setAutoHintOnAgain(ah);
       setDayStartHour(typeof dsh === 'number' ? String(dsh) : '0');
       if (ed) setExamDate(ed);
       setForecastThreshold(String(ft));
@@ -100,6 +103,11 @@ export default function SettingsPage() {
     const n = parseFloat(v);
     if (!Number.isFinite(n) || n < 1 || n > 60) return;
     await setJsonSetting('pomodoro_break_minutes', n);
+  };
+
+  const saveAutoHintOnAgain = async (v: boolean) => {
+    setAutoHintOnAgain(v);
+    await setJsonSetting('auto_hint_on_again', v);
   };
 
   const saveDayStartHour = async (v: string) => {
@@ -302,6 +310,21 @@ export default function SettingsPage() {
             <div className="text-sm text-dark-100 font-light">Confidence mode (binary rating)</div>
             <div className="text-xs text-dark-400 font-light mt-0.5">
               Replace the four buttons with two: <span className="text-dark-200">Knew it</span> / <span className="text-dark-200">Didn&rsquo;t</span>. Maps to FSRS Good (3) / Again (1). Faster, less decision fatigue on long sessions.
+            </div>
+          </div>
+        </label>
+
+        <label className="flex items-start gap-3 cursor-pointer mt-4">
+          <input
+            type="checkbox"
+            checked={autoHintOnAgain}
+            onChange={e => saveAutoHintOnAgain(e.target.checked)}
+            className="mt-1 accent-saffron-400"
+          />
+          <div>
+            <div className="text-sm text-dark-100 font-light">Auto-hint on Again</div>
+            <div className="text-xs text-dark-400 font-light mt-0.5">
+              When you rate a card Again, Haiku writes a one-sentence diagnosis of why you likely missed it. The hint appears below the card next time you review it, then clears once you get the card right. Off by default; turning it on means an extra Claude call per lapse.
             </div>
           </div>
         </label>

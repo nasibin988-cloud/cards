@@ -42,6 +42,9 @@ import {
 } from '@/components/study/PomodoroLayer';
 import { useRemoteControl, type RemoteHandlers } from '@/lib/sync/useRemoteControl';
 import { improveCardWithAI, type Diagnosis } from '@/lib/ai/improve-card';
+import { generateMnemonic } from '@/lib/ai/mnemonic';
+import { disambiguateCard } from '@/lib/ai/disambiguate';
+import { generateAndStoreLapseHint, getLapseHint, clearLapseHint } from '@/lib/ai/lapse-hint';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -137,12 +140,30 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [justRefined, setJustRefined] = useState(false);
   const [refineSnapshot, setRefineSnapshot] = useState<{ noteId: string; fields: NoteFields } | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  /**
+   * Mnemonic + disambiguator state. Both follow the same shape as
+   * refine: a snapshot of the field before the AI write so the user
+   * can revert (Shift+G / Shift+D). `busy` toggles the same shimmer
+   * overlay refine uses. No compare view — these are pure appends,
+   * not replacements, so the visual is just the new content fading
+   * in inside the existing card.
+   */
+  const [busyMnemonic, setBusyMnemonic] = useState(false);
+  const [busyDisamb, setBusyDisamb] = useState(false);
+  const [mnemonicSnapshot, setMnemonicSnapshot] = useState<{ noteId: string; oldMnemonic?: string } | null>(null);
+  const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldBack: string } | null>(null);
+  const [lapseHint, setLapseHint] = useState<string | null>(null);
 
-  // Drop any refine state when the card changes — refine-undo is
-  // intentionally scoped to the moment you made the change.
+  // Drop any refine / mnemonic / disamb state when the card changes —
+  // these undos are scoped to the moment you made the change.
   useEffect(() => {
     setRefineSnapshot(null);
     setCompareOpen(false);
+    setMnemonicSnapshot(null);
+    setDisambSnapshot(null);
+    // Pull the stored lapse hint for this card if there is one.
+    if (card?.id) setLapseHint(getLapseHint(card.id));
+    else setLapseHint(null);
   }, [card?.id]);
   // deck.id keys the persisted pomodoro state so navigating across
   // decks always resets, but a same-deck round-trip (e.g. opening
@@ -510,10 +531,28 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       historyRef.current.push({ kind: 'review', cardId: card.id, logId: log.id });
       const ratedId = card.id;
       setSessionRatedIds(s => s.has(ratedId) ? s : new Set(s).add(ratedId));
+      // Lapse-hint hooks. On Again (rating 1) AND the user has opted
+      // in via the setting, fire a Haiku call in the background to
+      // generate a "why you might have missed this" hint that surfaces
+      // next time this card is shown. On any non-Again rating, clear
+      // any stored hint for this card — once you've gotten it right
+      // the diagnosis is stale.
+      if (rating === 1) {
+        const enabledP = getJsonSetting<boolean>('auto_hint_on_again', false);
+        const noteSnap = note;
+        const cardSnap = card;
+        if (noteSnap) {
+          void enabledP.then(enabled => {
+            if (enabled) void generateAndStoreLapseHint(noteSnap, cardSnap);
+          });
+        }
+      } else {
+        clearLapseHint(card.id);
+      }
       try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
       fetchNext();
     },
-    [card, phase, shownAt, effectiveOptsFor, fetchNext, resumeKey, inBreak],
+    [card, note, phase, shownAt, effectiveOptsFor, fetchNext, resumeKey, inBreak],
   );
 
   const burry = useCallback(async () => {
@@ -620,6 +659,86 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [refineSnapshot, note]);
+
+  /**
+   * G = generate mnemonic. Opus writes into the note's existing
+   * `mnemonic` field; CardRenderer's BackBlock for mnemonics picks
+   * it up on next render. Shift+G reverts.
+   */
+  const writeMnemonic = useCallback(async () => {
+    if (!note || busyMnemonic) return;
+    setBusyMnemonic(true);
+    try {
+      const out = await generateMnemonic(note);
+      if (!out) {
+        showFlash('Opus: no clean mnemonic hook for this card.');
+        return;
+      }
+      const oldMnemonic = note.fields.mnemonic;
+      const newFields: NoteFields = { ...note.fields, mnemonic: out };
+      await updateNote(note.id, { fields: newFields });
+      setNote({ ...note, fields: newFields, modifiedAt: Date.now() });
+      setMnemonicSnapshot({ noteId: note.id, oldMnemonic });
+      showFlash('Mnemonic added · Shift+G undoes.');
+    } catch (err) {
+      showFlash(`Mnemonic failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMnemonic(false);
+    }
+  }, [note, busyMnemonic]);
+
+  const revertMnemonic = useCallback(async () => {
+    if (!mnemonicSnapshot || !note || note.id !== mnemonicSnapshot.noteId) return;
+    const restored: NoteFields = { ...note.fields, mnemonic: mnemonicSnapshot.oldMnemonic };
+    try {
+      await updateNote(note.id, { fields: restored });
+      setNote({ ...note, fields: restored, modifiedAt: Date.now() });
+      setMnemonicSnapshot(null);
+      showFlash('Mnemonic reverted.');
+    } catch (err) {
+      showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [mnemonicSnapshot, note]);
+
+  /**
+   * D = disambiguate. Opus picks the most confusable peer card in the
+   * deck and appends a "distinct from X because Y" sentence to the
+   * back. Shift+D reverts to the pre-append back.
+   */
+  const writeDisambiguator = useCallback(async () => {
+    if (!note || busyDisamb) return;
+    setBusyDisamb(true);
+    try {
+      const { snippet, newBack } = await disambiguateCard(note);
+      if (!snippet) {
+        showFlash('Opus: no confusable peer found.');
+        return;
+      }
+      const oldBack = note.fields.back ?? '';
+      const newFields: NoteFields = { ...note.fields, back: newBack };
+      await updateNote(note.id, { fields: newFields });
+      setNote({ ...note, fields: newFields, modifiedAt: Date.now() });
+      setDisambSnapshot({ noteId: note.id, oldBack });
+      showFlash('Disambiguator appended · Shift+D undoes.');
+    } catch (err) {
+      showFlash(`Disambiguate failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyDisamb(false);
+    }
+  }, [note, busyDisamb]);
+
+  const revertDisambiguator = useCallback(async () => {
+    if (!disambSnapshot || !note || note.id !== disambSnapshot.noteId) return;
+    const restored: NoteFields = { ...note.fields, back: disambSnapshot.oldBack };
+    try {
+      await updateNote(note.id, { fields: restored });
+      setNote({ ...note, fields: restored, modifiedAt: Date.now() });
+      setDisambSnapshot(null);
+      showFlash('Disambiguator reverted.');
+    } catch (err) {
+      showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [disambSnapshot, note]);
 
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
@@ -852,6 +971,25 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         }
         return;
       }
+      // G = generate mnemonic (writes to note.fields.mnemonic). Shift+G
+      // reverts to the prior mnemonic value (or empty). Same
+      // separate-from-Cmd+Z principle as refine.
+      if (e.key === 'g' || e.key === 'G') {
+        if (!note) return;
+        e.preventDefault();
+        if (e.shiftKey) void revertMnemonic();
+        else void writeMnemonic();
+        return;
+      }
+      // D = disambiguate. Opus picks the most-confusable peer and
+      // appends a "distinct from X" line to the back. Shift+D reverts.
+      if (e.key === 'd' || e.key === 'D') {
+        if (!note) return;
+        e.preventDefault();
+        if (e.shiftKey) void revertDisambiguator();
+        else void writeDisambiguator();
+        return;
+      }
       if (e.key === 'u' || e.key === 'U') {
         undo();
         return;
@@ -881,7 +1019,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1312,11 +1450,12 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                 className={cn(
                   'glass-card rounded-3xl p-7 md:p-9 min-h-[14rem] flex items-center justify-center animate-fade-in',
                   phase === 'front' && 'cursor-pointer hover:border-white/[0.10] transition',
-                  // Refine animation overlays. While Opus is thinking,
-                  // the children dim + the saffron shimmer sweeps across.
+                  // Refine / mnemonic / disambiguator share the same
+                  // shimmer overlay while Opus is thinking, since the
+                  // semantic is the same ("AI is changing this card").
                   // When new content lands, `card-refined-in` does the
                   // soft fade-up + glow.
-                  refining && 'card-refining',
+                  (refining || busyMnemonic || busyDisamb) && 'card-refining',
                   justRefined && !refining && 'card-refined-in',
                 )}
                 aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
@@ -1353,6 +1492,13 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               <div className="glass-card rounded-2xl p-4 max-w-xl mx-auto text-center">
                 <div className="text-2xs uppercase tracking-widest text-saffron-400 mb-1">Hint</div>
                 <div className="text-sm font-light italic text-dark-100">{hint}</div>
+              </div>
+            )}
+
+            {!compareOpen && phase === 'back' && lapseHint && (
+              <div className="glass-card rounded-2xl p-4 max-w-xl mx-auto animate-fade-in border border-saffron-700/30 bg-saffron-900/10">
+                <div className="text-2xs uppercase tracking-widest text-saffron-400 mb-1.5">Last time you missed this</div>
+                <div className="text-sm font-light italic text-dark-100 leading-relaxed">{lapseHint}</div>
               </div>
             )}
 
