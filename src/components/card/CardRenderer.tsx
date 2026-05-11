@@ -260,6 +260,12 @@ function CardRendererImpl({ note, card, side, className }: Props) {
               {note.fields.extra && (
                 <BackBlock label="Extra" variant="extra" html={renderRichText(note.fields.extra)} />
               )}
+              {note.fields.mnemonic && (
+                <BackBlock label="Mnemonic" variant="mnemonic" html={renderRichText(note.fields.mnemonic)} />
+              )}
+              {note.fields.disambiguator && (
+                <BackBlock label="Distinct from" variant="disambiguator" html={renderRichText(note.fields.disambiguator)} />
+              )}
               {note.fields.context && (
                 <BackBlock label="Context" variant="context" html={renderRichText(note.fields.context)} />
               )}
@@ -346,6 +352,9 @@ function CardRendererImpl({ note, card, side, className }: Props) {
             )}
             {note.fields.mnemonic && (
               <BackBlock label="Mnemonic" variant="mnemonic" html={renderRichText(note.fields.mnemonic)} />
+            )}
+            {note.fields.disambiguator && (
+              <BackBlock label="Distinct from" variant="disambiguator" html={renderRichText(note.fields.disambiguator)} />
             )}
             {note.fields.context && (
               <BackBlock label="Context" variant="context" html={renderRichText(note.fields.context)} />
@@ -462,6 +471,7 @@ function hasExtraContent(note: Note): boolean {
   return !!(
     note.fields.extra ||
     note.fields.mnemonic ||
+    note.fields.disambiguator ||
     note.fields.context ||
     note.fields.source ||
     note.tags.length > 0
@@ -480,7 +490,7 @@ function hasExtraContent(note: Note): boolean {
  * Labels follow the same hue family as their content so the eye can chunk
  * sections without reading.
  */
-type BackVariant = 'back' | 'extra' | 'mnemonic' | 'context';
+type BackVariant = 'back' | 'extra' | 'mnemonic' | 'context' | 'disambiguator';
 
 const VARIANT: Record<BackVariant, { body: string; label: string }> = {
   back: {
@@ -498,6 +508,13 @@ const VARIANT: Record<BackVariant, { body: string; label: string }> = {
   context: {
     body: 'text-sm leading-relaxed font-light text-persian-200/80',
     label: 'text-2xs uppercase tracking-widest text-persian-400/80 mb-1.5 leading-none',
+  },
+  disambiguator: {
+    // Crimson hue so a confusable-pair callout stands out from extra +
+    // mnemonic without competing with them. Slightly dimmer body so it
+    // doesn't yell — it's a contextual sidebar, not the main message.
+    body: 'text-sm md:text-[0.95rem] leading-relaxed font-light text-crimson-200/85',
+    label: 'text-2xs uppercase tracking-widest text-crimson-400/80 mb-1.5 leading-none',
   },
 };
 

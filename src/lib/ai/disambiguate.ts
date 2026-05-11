@@ -32,10 +32,9 @@ Output JSON only:
 { "snippet": "<the sentence, or 'NONE'>" }`;
 
 export interface DisambiguateResult {
-  /** The new disambiguator snippet. Empty if Opus found nothing. */
+  /** The new disambiguator snippet. Empty if Opus found nothing.
+   *  Caller writes this into note.fields.disambiguator (its own field). */
   snippet: string;
-  /** The new back: original + " " + snippet. Empty if no snippet. */
-  newBack: string;
 }
 
 export async function disambiguateCard(note: Note): Promise<DisambiguateResult> {
@@ -67,7 +66,7 @@ export async function disambiguateCard(note: Note): Promise<DisambiguateResult> 
   const top = scored.slice(0, 60).map(s => s.note);
 
   if (top.length === 0) {
-    return { snippet: '', newBack: '' };
+    return { snippet: '' };
   }
 
   const peerLines = top
@@ -105,11 +104,6 @@ Write a disambiguator per the rules. JSON only.`;
   })();
   const parsed = JSON.parse(json) as { snippet?: string };
   const snippet = (parsed.snippet ?? '').trim();
-  if (!snippet || snippet === 'NONE') return { snippet: '', newBack: '' };
-
-  const existingBack = (note.fields.back ?? '').trim();
-  const newBack = existingBack
-    ? `${existingBack}\n\n${snippet}`
-    : snippet;
-  return { snippet, newBack };
+  if (!snippet || snippet === 'NONE') return { snippet: '' };
+  return { snippet };
 }

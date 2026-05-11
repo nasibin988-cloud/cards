@@ -54,6 +54,12 @@ export interface NoteFields {
   mnemonic?: string;
   context?: string;
   source?: string;
+  /**
+   * AI-generated "distinct from X because Y" disambiguator, lives in
+   * its own field so it never collides with the user's authored back.
+   * Rendered as a labeled BackBlock on the reveal side.
+   */
+  disambiguator?: string;
 }
 
 export interface OcclusionRect {

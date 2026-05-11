@@ -151,7 +151,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [busyMnemonic, setBusyMnemonic] = useState(false);
   const [busyDisamb, setBusyDisamb] = useState(false);
   const [mnemonicSnapshot, setMnemonicSnapshot] = useState<{ noteId: string; oldMnemonic?: string } | null>(null);
-  const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldBack: string } | null>(null);
+  const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldDisambiguator?: string } | null>(null);
   const [lapseHint, setLapseHint] = useState<string | null>(null);
 
   // Drop any refine / mnemonic / disamb state when the NOTE changes.
@@ -726,17 +726,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     if (!note || busyDisamb) return;
     setBusyDisamb(true);
     try {
-      const { snippet, newBack } = await disambiguateCard(note);
+      const { snippet } = await disambiguateCard(note);
       if (!snippet) {
         showFlash('Opus: no confusable peer found.');
         return;
       }
-      const oldBack = note.fields.back ?? '';
-      const newFields: NoteFields = { ...note.fields, back: newBack };
+      // Lives in its own field so it never collides with the user's
+      // authored back. Re-running D overwrites it cleanly.
+      const oldDisambiguator = note.fields.disambiguator;
+      const newFields: NoteFields = { ...note.fields, disambiguator: snippet };
       await updateNote(note.id, { fields: newFields });
       setNote({ ...note, fields: newFields, modifiedAt: Date.now() });
-      setDisambSnapshot({ noteId: note.id, oldBack });
-      showFlash('Disambiguator appended · Shift+D undoes.');
+      setDisambSnapshot({ noteId: note.id, oldDisambiguator });
+      showFlash('Disambiguator added · Shift+D undoes.');
     } catch (err) {
       showFlash(`Disambiguate failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -751,7 +753,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       showFlash('Nothing to revert on this card.');
       return;
     }
-    const restored: NoteFields = { ...note.fields, back: disambSnapshot.oldBack };
+    const restored: NoteFields = { ...note.fields, disambiguator: disambSnapshot.oldDisambiguator };
     try {
       await updateNote(note.id, { fields: restored });
       setNote({ ...note, fields: restored, modifiedAt: Date.now() });
