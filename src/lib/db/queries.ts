@@ -860,6 +860,13 @@ export interface UpdateNoteInput {
    * Omit to leave the existing list unchanged.
    */
   phrasings?: string[] | null;
+  /**
+   * Replace the append-only phrasing history. Same null/[] = clear,
+   * omit = leave-alone semantics as the others. In practice callers
+   * pass the union of `note.phrasingHistory` + any new strings; we
+   * don't auto-dedupe so the history reflects what was actually shown.
+   */
+  phrasingHistory?: string[] | null;
 }
 
 /**
@@ -881,6 +888,9 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
     const newPhrasings = patch.phrasings === undefined
       ? note.phrasings
       : (patch.phrasings && patch.phrasings.length > 0 ? patch.phrasings : undefined);
+    const newPhrasingHistory = patch.phrasingHistory === undefined
+      ? note.phrasingHistory
+      : (patch.phrasingHistory && patch.phrasingHistory.length > 0 ? patch.phrasingHistory : undefined);
     const updated: Note = {
       ...note,
       fields: newFields,
@@ -888,6 +898,7 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
       tier: patch.tier ?? note.tier,
       siblings: newSiblings,
       phrasings: newPhrasings,
+      phrasingHistory: newPhrasingHistory,
       modifiedAt: t,
     };
     await db().notes.put(updated);
@@ -1100,12 +1111,40 @@ export async function decksByPath(path: string): Promise<Deck[]> {
  */
 export interface PickerOptions {
   force?: boolean;
+  /**
+   * Per-session "send these cards toward the end of today's queue" set.
+   * Mapped to a deprioritisation: the picker still serves any non-
+   * deferred card first; only when every non-deferred candidate is
+   * exhausted does it return a deferred one. FSRS state (due, state,
+   * stability, lapses) is NEVER touched — this just reorders what
+   * the user sees within the eligible pool. Cleared on tab close
+   * (held in-memory in the Reviewer).
+   */
+  deferred?: ReadonlySet<string>;
 }
 
 export async function getNextCardForStudy(
   deckId: string | string[],
   at: Date = new Date(),
   opts: PickerOptions = {},
+): Promise<Card | undefined> {
+  // Two-pass to honor `deferred`: first try with deferred IDs filtered
+  // out; if that returns undefined, run again ignoring deferral so the
+  // deferred cards still surface before the queue goes empty. Keeps
+  // every other branch of the picker untouched.
+  const deferred = opts.deferred && opts.deferred.size > 0 ? opts.deferred : null;
+  if (deferred) {
+    const candidate = await pickNextInternal(deckId, at, opts, deferred);
+    if (candidate) return candidate;
+  }
+  return pickNextInternal(deckId, at, opts, null);
+}
+
+async function pickNextInternal(
+  deckId: string | string[],
+  at: Date,
+  opts: PickerOptions,
+  excludeIds: ReadonlySet<string> | null,
 ): Promise<Card | undefined> {
   const nowMs = at.getTime();
   const force = opts.force === true;
@@ -1114,6 +1153,7 @@ export async function getNextCardForStudy(
     ids.length === 1
       ? db().cards.where('[deckId+state]').equals([ids[0], state] as [string, string])
       : db().cards.where('[deckId+state]').anyOf(ids.map(d => [d, state] as [string, string]));
+  const notDeferred = (c: Card) => excludeIds === null || !excludeIds.has(c.id);
 
   // Learning/relearning steps bypass caps (Anki convention) — they're
   // mid-flight, not new introductions or full reviews. In force mode
@@ -1121,37 +1161,30 @@ export async function getNextCardForStudy(
   // pending learning steps before they would naturally come up.
   const learning = force
     ? (await queryByState('learning')
-        .filter(c => !c.suspended && !c.buried)
+        .filter(c => !c.suspended && !c.buried && notDeferred(c))
         .sortBy('due'))[0]
     : await queryByState('learning')
-        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+        .filter(c => !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
         .first();
   if (learning) return learning;
 
   const relearning = force
     ? (await queryByState('relearning')
-        .filter(c => !c.suspended && !c.buried)
+        .filter(c => !c.suspended && !c.buried && notDeferred(c))
         .sortBy('due'))[0]
     : await queryByState('relearning')
-        .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+        .filter(c => !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
         .first();
   if (relearning) return relearning;
 
-  // Reviews: keep the due gate even in force mode. The user said
-  // explicitly that they want learning + new to flow, not future
-  // reviews dragged forward.
   const review = await queryByState('review')
-    .filter(c => !c.suspended && !c.buried && c.due <= nowMs)
+    .filter(c => !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
     .sortBy('due');
 
   const newCards = await queryByState('new')
-    .filter(c => !c.suspended && !c.buried)
+    .filter(c => !c.suspended && !c.buried && notDeferred(c))
     .sortBy('createdAt');
 
-  // Build the cap context exactly once for the whole pick. `cardAllowedByCapsSync`
-  // then runs as a Map lookup — orders of magnitude faster than the
-  // per-candidate version when the candidate pool is large. In force
-  // mode we skip cap construction entirely; every card is allowed.
   const ctx = (!force && (review.length > 0 || newCards.length > 0))
     ? await buildCapContext(ids, at)
     : null;
@@ -1161,8 +1194,6 @@ export async function getNextCardForStudy(
       if (cardAllowedByCapsSync(c, ctx)) return c;
     }
   } else if (force && review.length > 0) {
-    // Force mode skipped cap-context, but reviews here are still
-    // genuinely due (passed the due-gate above) so they're fair game.
     return review[0];
   }
 
@@ -1173,7 +1204,7 @@ export async function getNextCardForStudy(
       ? await tagInterleaveOrder(newCards)
       : order === 'random'
         ? shuffle(newCards)
-        : newCards; // 'added' = ASC by createdAt, already sorted.
+        : newCards;
     for (const c of ordered) {
       if (force || ctx === null || cardAllowedByCapsSync(c, ctx)) return c;
     }
@@ -1203,6 +1234,23 @@ export async function peekNextCardForStudy(
   at: Date = new Date(),
   opts: PickerOptions = {},
 ): Promise<Card | undefined> {
+  // Same two-pass shape as getNextCardForStudy: deferred cards only
+  // surface after the non-deferred pool is exhausted.
+  const deferred = opts.deferred && opts.deferred.size > 0 ? opts.deferred : null;
+  if (deferred) {
+    const candidate = await peekInternal(deckId, excludeCardId, at, opts, deferred);
+    if (candidate) return candidate;
+  }
+  return peekInternal(deckId, excludeCardId, at, opts, null);
+}
+
+async function peekInternal(
+  deckId: string | string[],
+  excludeCardId: string,
+  at: Date,
+  opts: PickerOptions,
+  excludeIds: ReadonlySet<string> | null,
+): Promise<Card | undefined> {
   const nowMs = at.getTime();
   const force = opts.force === true;
   const ids = Array.isArray(deckId) ? deckId : [deckId];
@@ -1210,32 +1258,32 @@ export async function peekNextCardForStudy(
     ids.length === 1
       ? db().cards.where('[deckId+state]').equals([ids[0], state] as [string, string])
       : db().cards.where('[deckId+state]').anyOf(ids.map(d => [d, state] as [string, string]));
+  const notDeferred = (c: Card) => excludeIds === null || !excludeIds.has(c.id);
 
   const learning = force
     ? (await queryByState('learning')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c))
         .sortBy('due'))[0]
     : await queryByState('learning')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
         .first();
   if (learning) return learning;
 
   const relearning = force
     ? (await queryByState('relearning')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c))
         .sortBy('due'))[0]
     : await queryByState('relearning')
-        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+        .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
         .first();
   if (relearning) return relearning;
 
-  // Reviews: due-gated even in force mode (matches getNextCardForStudy).
   const review = await queryByState('review')
-    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && c.due <= nowMs)
+    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c) && c.due <= nowMs)
     .sortBy('due');
 
   const newCards = await queryByState('new')
-    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried)
+    .filter(c => c.id !== excludeCardId && !c.suspended && !c.buried && notDeferred(c))
     .sortBy('createdAt');
 
   const ctx = (!force && (review.length > 0 || newCards.length > 0))

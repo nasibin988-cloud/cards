@@ -446,6 +446,19 @@ input.type-cloze:focus {
   100% { opacity: 0; }
 }
 
+/* ─── Card has alternate phrasings ────────────────────────────────
+ * Quiet saffron edge on cards that have Opus-generated alternate
+ * wordings, so the user can tell at a glance which cards have been
+ * processed. The dot-row indicator in the top-right of the card
+ * still shows which phrasing is currently rotated in; this is just
+ * a more diffuse "this is a rephrased card" cue.
+ */
+.card-has-phrasings {
+  box-shadow:
+    inset 0 0 0 1px rgba(212, 192, 156, 0.12),
+    0 0 18px rgba(212, 192, 156, 0.06);
+}
+
 /* ─── Compare mode (post-refine side-by-side) ──────────────────────
  * After Opus rewrites the card we drop into a two-pane diff so the
  * user can eyeball the change before keeping it. Old is on the left,

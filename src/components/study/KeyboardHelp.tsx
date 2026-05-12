@@ -40,6 +40,7 @@ const STUDY_ROWS: Row[] = [
   { keys: ['⇧D'], description: 'Revert the last disambiguator on this card' },
   { keys: ['V'], description: 'Generate alternate phrasings (rotates on each review to fight rote learning)' },
   { keys: ['⇧V'], description: 'Revert the alternate phrasings on this card' },
+  { keys: ['⇧P'], description: 'Rephrase + defer the current card to near the end of today (no schedule change)' },
   { keys: ['P'], description: 'Read aloud / stop (TTS — toggle in Settings)' },
   { keys: ['E'], description: 'Edit this note' },
   { keys: ['B'], description: 'Bury until tomorrow' },

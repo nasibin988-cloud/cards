@@ -95,6 +95,14 @@ export interface Note {
    */
   phrasings?: string[];
   /**
+   * Every phrasing this card has EVER had, including originals replaced
+   * by later auto-rephrasings. Append-only; the user gets a small panel
+   * on the card to step through them. Distinct from `phrasings` (the
+   * live rotation pool) so we never lose past wordings the user wants
+   * back.
+   */
+  phrasingHistory?: string[];
+  /**
    * Original Anki note id from the .apkg this note was imported from. Stored
    * as a string because Anki ids are 64-bit timestamps (overflow JS Number).
    * Lets reset/resync deterministically restore authoring order without the

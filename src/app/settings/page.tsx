@@ -33,6 +33,11 @@ export default function SettingsPage() {
   const [pomodoroWork, setPomodoroWork] = useState('25');
   const [pomodoroBreak, setPomodoroBreak] = useState('5');
   const [autoHintOnAgain, setAutoHintOnAgain] = useState(false);
+  const [autoRephraseEnabled, setAutoRephraseEnabled] = useState(false);
+  const [autoRephraseMinStability, setAutoRephraseMinStability] = useState('7');
+  const [autoRephraseMaxPhrasings, setAutoRephraseMaxPhrasings] = useState('4');
+  const [autoRephraseOnlyGoodEasy, setAutoRephraseOnlyGoodEasy] = useState(true);
+  const [autoRephraseError, setAutoRephraseError] = useState<string | null>(null);
   const [dayStartHour, setDayStartHour] = useState('0');
   const [dayStartHourError, setDayStartHourError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
@@ -54,6 +59,10 @@ export default function SettingsPage() {
       const pw = await getJsonSetting<number>('pomodoro_work_minutes', 25);
       const pb = await getJsonSetting<number>('pomodoro_break_minutes', 5);
       const ah = await getJsonSetting<boolean>('auto_hint_on_again', false);
+      const are = await getJsonSetting<boolean>('auto_rephrase_enabled', false);
+      const arms = await getJsonSetting<number>('auto_rephrase_min_stability_days', 7);
+      const armp = await getJsonSetting<number>('auto_rephrase_max_phrasings', 4);
+      const aroge = await getJsonSetting<boolean>('auto_rephrase_only_good_or_easy', true);
       const dsh = await getJsonSetting<number | null>('day_start_hour', null);
       const ed = await getSetting('exam_date');
       const ft = await getJsonSetting<number>('forecast_threshold', 0.6);
@@ -68,6 +77,10 @@ export default function SettingsPage() {
       setPomodoroWork(String(pw));
       setPomodoroBreak(String(pb));
       setAutoHintOnAgain(ah);
+      setAutoRephraseEnabled(are);
+      setAutoRephraseMinStability(String(arms));
+      setAutoRephraseMaxPhrasings(String(armp));
+      setAutoRephraseOnlyGoodEasy(aroge);
       setDayStartHour(typeof dsh === 'number' ? String(dsh) : '0');
       if (ed) setExamDate(ed);
       setForecastThreshold(String(ft));
@@ -108,6 +121,34 @@ export default function SettingsPage() {
   const saveAutoHintOnAgain = async (v: boolean) => {
     setAutoHintOnAgain(v);
     await setJsonSetting('auto_hint_on_again', v);
+  };
+  const saveAutoRephraseEnabled = async (v: boolean) => {
+    setAutoRephraseEnabled(v);
+    await setJsonSetting('auto_rephrase_enabled', v);
+  };
+  const saveAutoRephraseMinStability = async (v: string) => {
+    setAutoRephraseMinStability(v);
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n < 0 || n > 3650) {
+      setAutoRephraseError('Min stability must be 0–3650 (days).');
+      return;
+    }
+    setAutoRephraseError(null);
+    await setJsonSetting('auto_rephrase_min_stability_days', n);
+  };
+  const saveAutoRephraseMaxPhrasings = async (v: string) => {
+    setAutoRephraseMaxPhrasings(v);
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 20) {
+      setAutoRephraseError('Max phrasings must be a whole number 0–20.');
+      return;
+    }
+    setAutoRephraseError(null);
+    await setJsonSetting('auto_rephrase_max_phrasings', n);
+  };
+  const saveAutoRephraseOnlyGoodEasy = async (v: boolean) => {
+    setAutoRephraseOnlyGoodEasy(v);
+    await setJsonSetting('auto_rephrase_only_good_or_easy', v);
   };
 
   const saveDayStartHour = async (v: string) => {
@@ -328,6 +369,60 @@ export default function SettingsPage() {
             </div>
           </div>
         </label>
+
+        <label className="flex items-start gap-3 cursor-pointer mt-4">
+          <input
+            type="checkbox"
+            checked={autoRephraseEnabled}
+            onChange={e => saveAutoRephraseEnabled(e.target.checked)}
+            className="mt-1 accent-saffron-400"
+          />
+          <div>
+            <div className="text-sm text-dark-100 font-light">Auto-rephrase mature cards</div>
+            <div className="text-xs text-dark-400 font-light mt-0.5">
+              When you rate a sufficiently-stable card Good or Easy, Opus quietly generates a fresh alternate phrasing in the background so the rotation pool grows over time. Off by default; turning it on means an Opus call after qualifying rates. Manual <span className="font-mono text-dark-200">V</span> always works regardless of this setting.
+            </div>
+          </div>
+        </label>
+        {autoRephraseEnabled && (
+          <div className="mt-3 ml-7 grid grid-cols-2 gap-3">
+            <label className="block">
+              <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Min stability (days)</div>
+              <input
+                value={autoRephraseMinStability}
+                onChange={e => saveAutoRephraseMinStability(e.target.value)}
+                className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+              />
+              <div className="text-2xs text-dark-500 mt-1 font-light">Cards must have at least this FSRS stability before auto-rephrasing kicks in. 7 means a card is averaging week-long intervals.</div>
+            </label>
+            <label className="block">
+              <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Max phrasings per card</div>
+              <input
+                value={autoRephraseMaxPhrasings}
+                onChange={e => saveAutoRephraseMaxPhrasings(e.target.value)}
+                className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+              />
+              <div className="text-2xs text-dark-500 mt-1 font-light">Once the live pool hits this cap, auto-rephrase stops adding to that card. Manual V can still push past it.</div>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer col-span-2">
+              <input
+                type="checkbox"
+                checked={autoRephraseOnlyGoodEasy}
+                onChange={e => saveAutoRephraseOnlyGoodEasy(e.target.checked)}
+                className="mt-1 accent-saffron-400"
+              />
+              <div>
+                <div className="text-sm text-dark-100 font-light">Only on Good / Easy ratings</div>
+                <div className="text-xs text-dark-400 font-light mt-0.5">
+                  Skip auto-rephrase when you rate Again or Hard — mid-confusion is the wrong moment to swap wording. Recommended.
+                </div>
+              </div>
+            </label>
+            {autoRephraseError && (
+              <div className="text-2xs text-crimson-300 font-light col-span-2">{autoRephraseError}</div>
+            )}
+          </div>
+        )}
 
         <label className="flex items-start gap-3 cursor-pointer mt-4">
           <input

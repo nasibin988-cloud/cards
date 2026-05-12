@@ -46,6 +46,7 @@ import { generateMnemonic } from '@/lib/ai/mnemonic';
 import { disambiguateCard } from '@/lib/ai/disambiguate';
 import { generateAndStoreLapseHint, getLapseHint, clearLapseHint } from '@/lib/ai/lapse-hint';
 import { generatePhrasings } from '@/lib/ai/phrasings';
+import { loadAutoRephraseConfig, runAutoRephrase, shouldAutoRephrase } from '@/lib/ai/auto-rephrase';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -154,7 +155,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
   const [mnemonicSnapshot, setMnemonicSnapshot] = useState<{ noteId: string; oldMnemonic?: string } | null>(null);
   const [disambSnapshot, setDisambSnapshot] = useState<{ noteId: string; oldDisambiguator?: string } | null>(null);
   const [busyPhrasings, setBusyPhrasings] = useState(false);
-  const [phrasingsSnapshot, setPhrasingsSnapshot] = useState<{ noteId: string; oldPhrasings?: string[] } | null>(null);
+  const [phrasingsSnapshot, setPhrasingsSnapshot] = useState<{
+    noteId: string;
+    oldPhrasings?: string[];
+    oldPhrasingHistory?: string[];
+  } | null>(null);
+  /**
+   * In-memory "send to end of today's queue" set. Holds card IDs that
+   * the user manually deferred via the rephrase-and-defer shortcut.
+   * Tab close = forgotten, which matches the semantic ("near the end
+   * of TODAY"). Refs not state — the picker reads it inside fetchNext
+   * and we don't want a re-render every time we add an entry.
+   */
+  const deferredRef = useRef<Set<string>>(new Set());
   const [lapseHint, setLapseHint] = useState<string | null>(null);
 
   // Drop any refine / mnemonic / disamb state when the NOTE changes.
@@ -410,7 +423,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     if (!next) {
       next = noteIdFilter
         ? await getNextCardFromNoteSet(noteIdFilter)
-        : await getNextCardForStudy(studyDeckIds, new Date(), { force: forceContinue });
+        : await getNextCardForStudy(studyDeckIds, new Date(), { force: forceContinue, deferred: deferredRef.current });
       if (next) n = await getNote(next.noteId);
     }
 
@@ -445,7 +458,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       const currentId = next.id;
       void (async () => {
         try {
-          const peek = await peekNextCardForStudy(studyDeckIds, currentId, new Date(), { force: forceContinue });
+          const peek = await peekNextCardForStudy(studyDeckIds, currentId, new Date(), { force: forceContinue, deferred: deferredRef.current });
           if (!peek) return;
           const peekNote = await getNote(peek.noteId);
           if (!peekNote) return;
@@ -560,6 +573,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       } else {
         clearLapseHint(card.id);
       }
+      // Auto-rephrase hook: fire-and-forget. Settings (default off)
+      // gate whether it runs; the helper checks stability + cap +
+      // good/easy rules. If it produces a phrasing, the change lands
+      // on the note table — next review of this card picks it up.
+      // Capture the post-rate updated card so the stability check
+      // reflects what FSRS just wrote.
+      const noteSnap = note;
+      const updatedCardForGate: Card = { ...card, stability: card.stability };
+      void loadAutoRephraseConfig().then(cfg => {
+        if (!noteSnap) return;
+        if (!shouldAutoRephrase(noteSnap, updatedCardForGate, rating, cfg)) return;
+        void runAutoRephrase(noteSnap);
+      });
       try { localStorage.removeItem(resumeKey); } catch { /* ignore */ }
       fetchNext();
     },
@@ -785,11 +811,20 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         return;
       }
       const oldPhrasings = note.phrasings;
-      // Phrasings live on the Note (top-level), not inside fields, so
-      // they don't break the record-of-strings contract `fields` has.
-      await updateNote(note.id, { phrasings: generated });
-      setNote({ ...note, phrasings: generated, modifiedAt: Date.now() });
-      setPhrasingsSnapshot({ noteId: note.id, oldPhrasings });
+      const oldPhrasingHistory = note.phrasingHistory;
+      // Append the current phrasings (the ones we're about to retire)
+      // plus the new ones to phrasingHistory so the user can still
+      // reach prior wordings. Dedupe to avoid bloat on repeat clicks.
+      const accumulated = new Set<string>([
+        ...(oldPhrasingHistory ?? []),
+        ...(oldPhrasings ?? []),
+        note.fields.front,
+        ...generated,
+      ]);
+      const newHistory = [...accumulated];
+      await updateNote(note.id, { phrasings: generated, phrasingHistory: newHistory });
+      setNote({ ...note, phrasings: generated, phrasingHistory: newHistory, modifiedAt: Date.now() });
+      setPhrasingsSnapshot({ noteId: note.id, oldPhrasings, oldPhrasingHistory });
       showFlash(`Added ${generated.length} phrasings · Shift+V undoes.`);
     } catch (err) {
       showFlash(`Phrasings failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -806,16 +841,72 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
       return;
     }
     const restored = phrasingsSnapshot.oldPhrasings;
+    const restoredHistory = phrasingsSnapshot.oldPhrasingHistory;
     try {
-      // null tells updateNote to clear; an array replaces.
-      await updateNote(note.id, { phrasings: restored ?? null });
-      setNote({ ...note, phrasings: restored, modifiedAt: Date.now() });
+      await updateNote(note.id, {
+        phrasings: restored ?? null,
+        phrasingHistory: restoredHistory ?? null,
+      });
+      setNote({
+        ...note,
+        phrasings: restored,
+        phrasingHistory: restoredHistory,
+        modifiedAt: Date.now(),
+      });
       setPhrasingsSnapshot(null);
       showFlash('Phrasings reverted.');
     } catch (err) {
       showFlash(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [phrasingsSnapshot, note, busyPhrasings]);
+
+  /**
+   * P = "rephrase and send near the end of today's queue." Generates one
+   * fresh phrasing for the current card, archives the old to history,
+   * then defers the card by adding its id to deferredRef. FSRS state is
+   * untouched — the picker reorders, never reschedules. If Opus returns
+   * no valid phrasing (cloze ord mismatch) we still defer; the user's
+   * intent was "see this later today" and the rephrasing is a bonus.
+   */
+  const rephraseAndDefer = useCallback(async () => {
+    if (!note || !card || busyPhrasings) return;
+    setBusyPhrasings(true);
+    try {
+      let phrasingsApplied: string[] | undefined;
+      try {
+        const generated = await generatePhrasings(note);
+        if (generated.length > 0) {
+          const accumulated = new Set<string>([
+            ...(note.phrasingHistory ?? []),
+            ...(note.phrasings ?? []),
+            note.fields.front,
+            ...generated,
+          ]);
+          phrasingsApplied = generated;
+          await updateNote(note.id, {
+            phrasings: generated,
+            phrasingHistory: [...accumulated],
+          });
+          setNote({
+            ...note,
+            phrasings: generated,
+            phrasingHistory: [...accumulated],
+            modifiedAt: Date.now(),
+          });
+        }
+      } catch { /* fall through — defer-only is still useful */ }
+      // Defer. Picker's two-pass means non-deferred cards are served
+      // first; the user lands back on this card once everything else
+      // due today has been touched.
+      deferredRef.current.add(card.id);
+      showFlash(phrasingsApplied
+        ? 'Rephrased + deferred to end of queue.'
+        : 'Deferred to end of queue.');
+      fetchNext();
+    } finally {
+      setBusyPhrasings(false);
+    }
+  }, [note, card, busyPhrasings, fetchNext]);
 
   const fetchHint = useCallback(async () => {
     if (!note || !card || hintLoading) return;
@@ -990,12 +1081,24 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         setFeynmanOpen(true);
         return;
       }
-      // P = read this side aloud / stop. Only meaningful when TTS is on.
-      if ((e.key === 'p' || e.key === 'P') && ttsPrefs.enabled) {
-        e.preventDefault();
-        if (ttsActive) { cancelSpeech(); setTtsActive(false); }
-        else speakCurrent(phase === 'back' ? 'back' : 'front');
-        return;
+      // P = read this side aloud / stop (TTS). Shift+P = rephrase the
+      // current card AND defer it to near the end of today's queue
+      // without touching FSRS. Two unrelated semantics but `P` was the
+      // first one wired up; we layer the shifted variant on top so
+      // existing muscle memory keeps working.
+      if ((e.key === 'p' || e.key === 'P' || e.code === 'KeyP')) {
+        if (e.shiftKey) {
+          if (!note || !card) return;
+          e.preventDefault();
+          void rephraseAndDefer();
+          return;
+        }
+        if (ttsPrefs.enabled) {
+          e.preventDefault();
+          if (ttsActive) { cancelSpeech(); setTtsActive(false); }
+          else speakCurrent(phase === 'back' ? 'back' : 'front');
+          return;
+        }
       }
       if (e.key === 'b' || e.key === 'B') {
         if (card) burry();
@@ -1108,7 +1211,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator, writePhrasings, revertPhrasings]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator, writePhrasings, revertPhrasings, rephraseAndDefer]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1564,6 +1667,11 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   // soft fade-up + glow.
                   (refining || busyMnemonic || busyDisamb || busyPhrasings) && 'card-refining',
                   justRefined && !refining && 'card-refined-in',
+                  // Subtle saffron edge on cards that have alternate
+                  // phrasings — visible enough to identify the card
+                  // as rephrased at a glance, not so loud that it
+                  // competes with the content.
+                  note?.phrasings && note.phrasings.length > 0 && 'card-has-phrasings',
                 )}
                 aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
               >
