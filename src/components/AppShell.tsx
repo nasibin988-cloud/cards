@@ -28,6 +28,7 @@ const NAV: NavItem[] = [
   { href: '/audit', label: 'Audit' },
   { href: '/trouble', label: 'Trouble' },
   { href: '/stats', label: 'Stats' },
+  { href: '/reports', label: 'Reports' },
   { href: '/settings', label: 'Settings' },
 ];
 
