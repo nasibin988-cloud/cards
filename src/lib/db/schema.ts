@@ -103,6 +103,22 @@ export interface Note {
    */
   phrasingHistory?: string[];
   /**
+   * Layered Opus-generated explanations of the card's content, surfaced
+   * via X in the Reviewer. Three levels:
+   *   - simple:  ELI-12 plain-language version, focused on intuition.
+   *   - deep:    full-mechanism, the "why under the why", at study depth.
+   *   - analogy: a concrete metaphor / story that anchors the concept.
+   * Generated together in one Opus call (cheaper than three). Stored on
+   * the Note (not in fields) for the same record-of-strings-contract
+   * reasons phrasings sits up here.
+   */
+  aiExplanations?: {
+    simple: string;
+    deep: string;
+    analogy: string;
+    generatedAt: number;
+  };
+  /**
    * Original Anki note id from the .apkg this note was imported from. Stored
    * as a string because Anki ids are 64-bit timestamps (overflow JS Number).
    * Lets reset/resync deterministically restore authoring order without the

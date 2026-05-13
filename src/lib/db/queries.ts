@@ -867,6 +867,11 @@ export interface UpdateNoteInput {
    * don't auto-dedupe so the history reflects what was actually shown.
    */
   phrasingHistory?: string[] | null;
+  /**
+   * Replace the layered AI explanations. Pass `null` to clear; pass a
+   * fresh object to overwrite. Omit to leave alone.
+   */
+  aiExplanations?: import('./schema').Note['aiExplanations'] | null;
 }
 
 /**
@@ -891,6 +896,10 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
     const newPhrasingHistory = patch.phrasingHistory === undefined
       ? note.phrasingHistory
       : (patch.phrasingHistory && patch.phrasingHistory.length > 0 ? patch.phrasingHistory : undefined);
+    // aiExplanations: null clears, object replaces, omit leaves alone.
+    const newAiExplanations = patch.aiExplanations === undefined
+      ? note.aiExplanations
+      : (patch.aiExplanations ?? undefined);
     const updated: Note = {
       ...note,
       fields: newFields,
@@ -899,6 +908,7 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
       siblings: newSiblings,
       phrasings: newPhrasings,
       phrasingHistory: newPhrasingHistory,
+      aiExplanations: newAiExplanations,
       modifiedAt: t,
     };
     await db().notes.put(updated);

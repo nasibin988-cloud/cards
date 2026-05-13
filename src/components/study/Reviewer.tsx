@@ -47,6 +47,8 @@ import { disambiguateCard } from '@/lib/ai/disambiguate';
 import { generateAndStoreLapseHint, getLapseHint, clearLapseHint } from '@/lib/ai/lapse-hint';
 import { generatePhrasings } from '@/lib/ai/phrasings';
 import { loadAutoRephraseConfig, runAutoRephrase, shouldAutoRephrase } from '@/lib/ai/auto-rephrase';
+import { generateExplanations, type LayeredExplanations } from '@/lib/ai/explain';
+import ExplanationPanel from '@/components/study/ExplanationPanel';
 import { FLAG_GLYPH, FLAG_LABEL, FlagGlyph } from '@/components/note/FlagPicker';
 import { previewIntervals, type ScheduledRating } from '@/lib/fsrs/scheduler';
 import CardRenderer from '@/components/card/CardRenderer';
@@ -168,6 +170,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
    * and we don't want a re-render every time we add an entry.
    */
   const deferredRef = useRef<Set<string>>(new Set());
+  /**
+   * Layered AI explanation state. Panel is open per-card (resets on
+   * note change). `busyExplain` drives the shimmer overlay during a
+   * generate; the panel itself reads its data from note.aiExplanations
+   * so the rendered content stays current after regenerate without
+   * extra plumbing.
+   */
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [busyExplain, setBusyExplain] = useState(false);
+  /** Tracks how many Again ratings this card has received in the
+   *  current session. Used to fire the auto-explain heuristic on the
+   *  Nth Again rate (default 2). Cleared on note change. */
+  const sessionAgainRef = useRef<Map<string, number>>(new Map());
   const [lapseHint, setLapseHint] = useState<string | null>(null);
 
   // Drop any refine / mnemonic / disamb state when the NOTE changes.
@@ -181,6 +196,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     setMnemonicSnapshot(null);
     setDisambSnapshot(null);
     setPhrasingsSnapshot(null);
+    setExplainOpen(false);
   }, [note?.id]);
 
   // Lapse hint is still per-card (it diagnoses a specific lapse on a
@@ -570,6 +586,37 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
             if (enabled) void generateAndStoreLapseHint(noteSnap, cardSnap);
           });
         }
+        // Auto-explain trigger. Tally Again ratings per-card-this-session;
+        // when the user crosses the threshold (default 2) AND auto-explain
+        // is enabled in settings AND we don't already have a cached
+        // explanation, fire one Opus call in the background. The panel
+        // doesn't auto-open — the user discovers it via the saffron
+        // edge on the card or the X shortcut. Quiet help is the goal.
+        const noteForExplain = note;
+        if (noteForExplain) {
+          const prev = sessionAgainRef.current.get(card.id) ?? 0;
+          const nextCount = prev + 1;
+          sessionAgainRef.current.set(card.id, nextCount);
+          if (!noteForExplain.aiExplanations) {
+            void (async () => {
+              const enabled = await getJsonSetting<boolean>('auto_explain_on_again', false);
+              if (!enabled) return;
+              const threshold = await getJsonSetting<number>('auto_explain_again_threshold', 2);
+              if (nextCount < Math.max(1, threshold)) return;
+              try {
+                const layered = await generateExplanations(noteForExplain);
+                await updateNote(noteForExplain.id, { aiExplanations: layered });
+                // Re-set note in state if we're still on the same one.
+                // The setNote stale-closure capture is safe here because
+                // updateNote already wrote to IndexedDB and the next
+                // re-mount picks it up regardless.
+                setNote(curr => (curr && curr.id === noteForExplain.id
+                  ? { ...curr, aiExplanations: layered, modifiedAt: Date.now() }
+                  : curr));
+              } catch { /* silent; auto-explain is best-effort */ }
+            })();
+          }
+        }
       } else {
         clearLapseHint(card.id);
       }
@@ -868,6 +915,34 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
    * no valid phrasing (cloze ord mismatch) we still defer; the user's
    * intent was "see this later today" and the rephrasing is a bonus.
    */
+  /**
+   * X = open the layered explanation panel. If the card already has
+   * cached explanations, just opens. Otherwise fires one Opus call
+   * for the three layers and opens once they land. Shift+X regenerates
+   * even when a cached set exists.
+   */
+  const openOrGenerateExplain = useCallback(async (forceRegen: boolean) => {
+    if (!note || busyExplain) return;
+    const hasCached = !!note.aiExplanations;
+    if (hasCached && !forceRegen) {
+      setExplainOpen(true);
+      return;
+    }
+    setBusyExplain(true);
+    try {
+      const layered: LayeredExplanations = await generateExplanations(note);
+      await updateNote(note.id, { aiExplanations: layered });
+      setNote({ ...note, aiExplanations: layered, modifiedAt: Date.now() });
+      setExplainOpen(true);
+    } catch (err) {
+      showFlash(`Explain failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyExplain(false);
+    }
+  }, [note, busyExplain]);
+
+  const closeExplain = useCallback(() => setExplainOpen(false), []);
+
   const rephraseAndDefer = useCallback(async () => {
     if (!note || !card || busyPhrasings) return;
     setBusyPhrasings(true);
@@ -1182,6 +1257,23 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
         else void writePhrasings();
         return;
       }
+      // X = open the layered AI-explanation panel (Simple / Deep /
+      // Analogy). If the panel is open, X closes it; if explanations
+      // aren't cached yet, the first press generates them with Opus.
+      // Shift+X always regenerates and (re)opens.
+      if (e.key === 'x' || e.key === 'X' || e.code === 'KeyX') {
+        if (!note) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        e.preventDefault();
+        if (e.shiftKey) {
+          void openOrGenerateExplain(true);
+        } else if (explainOpen) {
+          closeExplain();
+        } else {
+          void openOrGenerateExplain(false);
+        }
+        return;
+      }
       if (e.key === 'u' || e.key === 'U') {
         undo();
         return;
@@ -1211,7 +1303,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator, writePhrasings, revertPhrasings, rephraseAndDefer]);
+  }, [phase, reveal, rate, askOpen, note, card, router, fetchHint, cycleFlag, snooze, undo, refineCard, compareOpen, keepRefine, revertRefine, writeMnemonic, revertMnemonic, writeDisambiguator, revertDisambiguator, writePhrasings, revertPhrasings, rephraseAndDefer, openOrGenerateExplain, closeExplain, explainOpen]);
 
   function isFormField(target: EventTarget | null): boolean {
     const tag = (target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1665,7 +1757,7 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                   // semantic is the same ("AI is changing this card").
                   // When new content lands, `card-refined-in` does the
                   // soft fade-up + glow.
-                  (refining || busyMnemonic || busyDisamb || busyPhrasings) && 'card-refining',
+                  (refining || busyMnemonic || busyDisamb || busyPhrasings || busyExplain) && 'card-refining',
                   justRefined && !refining && 'card-refined-in',
                   // Subtle saffron edge on cards that have alternate
                   // phrasings — visible enough to identify the card
@@ -1675,6 +1767,10 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
                 )}
                 aria-label={phase === 'front' ? 'Click to reveal answer' : undefined}
               >
+                {/* Cached AI explanation indicator — soft pulsing dot
+                    in the top-left. Visible whenever note.aiExplanations
+                    is populated; tells the user X has something cached. */}
+                {note?.aiExplanations && <span className="explain-indicator" aria-hidden />}
                 {/* Tiny "phrasings rotation" indicator in the top-right
                     corner — only shown when this note has alternates.
                     Dots: filled = current phrasing, hollow = others.
@@ -1749,6 +1845,19 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               confidenceMode
                 ? <ConfidenceButtons intervals={intervals} onRate={rate} />
                 : <RatingButtons intervals={intervals} onRate={rate} />
+            )}
+
+            {/* Layered AI-explanation panel. Lives below the rating
+                buttons so the user's primary action (rate the card) is
+                still the most prominent thing on screen. Only renders
+                when the user opened it (X) AND we have cached layers. */}
+            {!compareOpen && explainOpen && note?.aiExplanations && (
+              <ExplanationPanel
+                explanations={note.aiExplanations}
+                onClose={closeExplain}
+                onRegenerate={() => void openOrGenerateExplain(true)}
+                busy={busyExplain}
+              />
             )}
           </div>
         )}

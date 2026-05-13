@@ -38,6 +38,9 @@ export default function SettingsPage() {
   const [autoRephraseMaxPhrasings, setAutoRephraseMaxPhrasings] = useState('4');
   const [autoRephraseOnlyGoodEasy, setAutoRephraseOnlyGoodEasy] = useState(true);
   const [autoRephraseError, setAutoRephraseError] = useState<string | null>(null);
+  const [autoExplainEnabled, setAutoExplainEnabled] = useState(false);
+  const [autoExplainThreshold, setAutoExplainThreshold] = useState('2');
+  const [autoExplainError, setAutoExplainError] = useState<string | null>(null);
   const [dayStartHour, setDayStartHour] = useState('0');
   const [dayStartHourError, setDayStartHourError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
@@ -63,6 +66,8 @@ export default function SettingsPage() {
       const arms = await getJsonSetting<number>('auto_rephrase_min_stability_days', 7);
       const armp = await getJsonSetting<number>('auto_rephrase_max_phrasings', 4);
       const aroge = await getJsonSetting<boolean>('auto_rephrase_only_good_or_easy', true);
+      const aex = await getJsonSetting<boolean>('auto_explain_on_again', false);
+      const aet = await getJsonSetting<number>('auto_explain_again_threshold', 2);
       const dsh = await getJsonSetting<number | null>('day_start_hour', null);
       const ed = await getSetting('exam_date');
       const ft = await getJsonSetting<number>('forecast_threshold', 0.6);
@@ -81,6 +86,8 @@ export default function SettingsPage() {
       setAutoRephraseMinStability(String(arms));
       setAutoRephraseMaxPhrasings(String(armp));
       setAutoRephraseOnlyGoodEasy(aroge);
+      setAutoExplainEnabled(aex);
+      setAutoExplainThreshold(String(aet));
       setDayStartHour(typeof dsh === 'number' ? String(dsh) : '0');
       if (ed) setExamDate(ed);
       setForecastThreshold(String(ft));
@@ -149,6 +156,20 @@ export default function SettingsPage() {
   const saveAutoRephraseOnlyGoodEasy = async (v: boolean) => {
     setAutoRephraseOnlyGoodEasy(v);
     await setJsonSetting('auto_rephrase_only_good_or_easy', v);
+  };
+  const saveAutoExplainEnabled = async (v: boolean) => {
+    setAutoExplainEnabled(v);
+    await setJsonSetting('auto_explain_on_again', v);
+  };
+  const saveAutoExplainThreshold = async (v: string) => {
+    setAutoExplainThreshold(v);
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 10) {
+      setAutoExplainError('Threshold must be a whole number 1–10.');
+      return;
+    }
+    setAutoExplainError(null);
+    await setJsonSetting('auto_explain_again_threshold', n);
   };
 
   const saveDayStartHour = async (v: string) => {
@@ -421,6 +442,39 @@ export default function SettingsPage() {
             {autoRephraseError && (
               <div className="text-2xs text-crimson-300 font-light col-span-2">{autoRephraseError}</div>
             )}
+          </div>
+        )}
+
+        <label className="flex items-start gap-3 cursor-pointer mt-4">
+          <input
+            type="checkbox"
+            checked={autoExplainEnabled}
+            onChange={e => saveAutoExplainEnabled(e.target.checked)}
+            className="mt-1 accent-saffron-400"
+          />
+          <div>
+            <div className="text-sm text-dark-100 font-light">Auto-explain after repeated Again</div>
+            <div className="text-xs text-dark-400 font-light mt-0.5">
+              When you've rated a card Again a few times in the same session, Opus quietly generates a three-layer explanation (simple / deep / analogy) in the background. The card gets a small saffron indicator so you know <span className="font-mono text-dark-200">X</span> has something ready. Off by default; one Opus call per qualifying card.
+            </div>
+          </div>
+        </label>
+        {autoExplainEnabled && (
+          <div className="mt-3 ml-7">
+            <label className="block max-w-xs">
+              <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">Again threshold</div>
+              <input
+                value={autoExplainThreshold}
+                onChange={e => saveAutoExplainThreshold(e.target.value)}
+                className="w-full bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono"
+              />
+              <div className="text-2xs text-dark-500 mt-1 font-light">
+                After this many Again ratings on the same card this session, auto-explain fires. 2 is the default.
+              </div>
+              {autoExplainError && (
+                <div className="text-2xs text-crimson-300 mt-1 font-light">{autoExplainError}</div>
+              )}
+            </label>
           </div>
         )}
 
