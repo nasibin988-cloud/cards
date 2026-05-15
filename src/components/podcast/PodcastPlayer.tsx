@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { Podcast, PodcastSegment, PodcastTurn } from '@/lib/db/schema';
-import { getSegmentAudio, listSegments } from '@/lib/db/podcast-queries';
+import { getSegmentAudio, listAudioForPodcast, listSegments } from '@/lib/db/podcast-queries';
 import { db } from '@/lib/db/dexie';
 import { speak, cancelSpeech } from '@/lib/tts/speak';
 import { DroneBed, playBumper } from '@/lib/podcast/audio-fx';
@@ -311,6 +311,42 @@ export default function PodcastPlayer({ podcast, segments, onSegmentsChange }: P
     }
   };
 
+  /* ─── Download stitched MP3 ────────────────────────────────── */
+
+  const [downloading, setDownloading] = useState(false);
+  const onDownload = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      // Pull every audio blob for this podcast, sort by segmentIndex,
+      // and byte-concatenate. tts-1 MP3 frames stitch cleanly across
+      // boundaries (same approach the per-turn renderer uses inside a
+      // single segment), so we don't need to re-encode.
+      const audio = await listAudioForPodcast(podcast.id);
+      audio.sort((a, b) => a.segmentIndex - b.segmentIndex);
+      if (audio.length === 0) {
+        setError('No rendered audio to download.');
+        setDownloading(false);
+        return;
+      }
+      const blob = new Blob(audio.map(a => a.blob), { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${slugify(podcast.name)}.mp3`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke after a tick so Safari has time to start the download.
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   /* ─── Study these cards ─────────────────────────────────────── */
 
   const allCardIds = useMemo(
@@ -432,7 +468,7 @@ export default function PodcastPlayer({ podcast, segments, onSegmentsChange }: P
         </div>
 
         {/* Action buttons */}
-        <div className="flex items-center justify-between gap-3 pt-1">
+        <div className="flex items-center justify-between gap-3 pt-1 flex-wrap">
           <button
             type="button"
             onClick={() => setShowTranscript(t => !t)}
@@ -440,15 +476,28 @@ export default function PodcastPlayer({ podcast, segments, onSegmentsChange }: P
           >
             {showTranscript ? 'hide transcript' : 'show transcript'}
           </button>
-          {allCardIds.length > 0 && podcast.deckIds[0] && (
-            <Link
-              href={`/study/${podcast.deckIds[0]}`}
-              className="text-2xs uppercase tracking-widest font-mono text-saffron-300 hover:text-saffron-200 transition"
-              title="Open Reviewer in the first deck of this podcast"
-            >
-              study these cards →
-            </Link>
-          )}
+          <div className="flex items-center gap-4">
+            {isOpenAI && (
+              <button
+                type="button"
+                onClick={onDownload}
+                disabled={downloading}
+                className="text-2xs uppercase tracking-widest font-mono text-dark-400 hover:text-saffron-300 transition disabled:opacity-50"
+                title="Download the whole podcast as a single MP3"
+              >
+                {downloading ? 'preparing…' : 'download mp3'}
+              </button>
+            )}
+            {allCardIds.length > 0 && podcast.deckIds[0] && (
+              <Link
+                href={`/study/${podcast.deckIds[0]}`}
+                className="text-2xs uppercase tracking-widest font-mono text-saffron-300 hover:text-saffron-200 transition"
+                title="Open Reviewer in the first deck of this podcast"
+              >
+                study these cards →
+              </Link>
+            )}
+          </div>
         </div>
       </div>
 
@@ -573,6 +622,15 @@ function fmt(sec: number): string {
  */
 function stripSpeakerLabels(text: string): string {
   return text.replace(/^[AB]:\s*/gm, '');
+}
+
+/** Filename-safe slug from a podcast title. */
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'podcast';
 }
 
 /**
