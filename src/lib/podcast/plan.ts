@@ -21,6 +21,10 @@ import { getSetting } from '@/lib/db/queries';
 import { renderPlain } from '@/lib/cloze/parser';
 import type { PodcastDepth } from '@/lib/db/schema';
 import type { Projection, ProjectedCard } from './queue-projection';
+import { timeoutSignal } from './abort';
+
+/** Plan pass can be heavy on big card sets; 3 minutes covers a 500-card run. */
+const PLAN_TIMEOUT_MS = 180_000;
 
 const PLANNER_MODEL = 'claude-sonnet-4-6';
 
@@ -138,6 +142,7 @@ export async function planPodcast(
   projection: Projection,
   targetSeconds: number,
   depthOverride: PodcastDepth | null,
+  signal?: AbortSignal,
 ): Promise<PodcastPlan> {
   if (projection.cards.length === 0) {
     throw new Error('Nothing to narrate: the queue projection is empty.');
@@ -149,12 +154,21 @@ export async function planPodcast(
   const targetWords = Math.round((targetSeconds / 60) * WORDS_PER_MINUTE);
   const payload = buildPayload(projection, targetWords, depthOverride);
 
-  const response = await client.messages.create({
-    model: PLANNER_MODEL,
-    max_tokens: 16_000,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: payload }],
-  });
+  const { signal: timedSignal, cleanup } = timeoutSignal(signal, PLAN_TIMEOUT_MS);
+  let response;
+  try {
+    response = await client.messages.create(
+      {
+        model: PLANNER_MODEL,
+        max_tokens: 16_000,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{ role: 'user', content: payload }],
+      },
+      { signal: timedSignal },
+    );
+  } finally {
+    cleanup();
+  }
 
   const text = response.content
     .map(b => (b.type === 'text' ? b.text : ''))

@@ -19,11 +19,16 @@ import { db } from '@/lib/db/dexie';
 import { renderPlain } from '@/lib/cloze/parser';
 import type { Note, PodcastDepth, PodcastTurn } from '@/lib/db/schema';
 import type { PlannedSegment } from './plan';
+import { timeoutSignal } from './abort';
 
 const SCRIPT_MODEL = 'claude-opus-4-7';
 
-/** Max simultaneous Opus calls. */
-const MAX_PARALLEL = 4;
+/** Max simultaneous Opus calls. Opus per-minute token limits are
+ *  comfortably above what 6 typical-segment scripts consume. */
+const MAX_PARALLEL = 6;
+
+/** Per-segment timeout. Long deep-tier scripts can run 60s; 120s is safe. */
+const SCRIPT_TIMEOUT_MS = 120_000;
 
 export interface ScriptedSegment {
   index: number;
@@ -151,15 +156,21 @@ async function scriptOne(
   lines.push('');
   lines.push('Write the conversation now. JSON only.');
 
-  const response = await client.messages.create(
-    {
-      model: SCRIPT_MODEL,
-      max_tokens: 12_000,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      messages: [{ role: 'user', content: lines.join('\n') }],
-    },
-    signal ? { signal } : undefined,
-  );
+  const { signal: timedSignal, cleanup } = timeoutSignal(signal, SCRIPT_TIMEOUT_MS);
+  let response;
+  try {
+    response = await client.messages.create(
+      {
+        model: SCRIPT_MODEL,
+        max_tokens: 12_000,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{ role: 'user', content: lines.join('\n') }],
+      },
+      { signal: timedSignal },
+    );
+  } finally {
+    cleanup();
+  }
 
   const text = response.content
     .map(b => (b.type === 'text' ? b.text : ''))

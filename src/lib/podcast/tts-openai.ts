@@ -20,6 +20,7 @@
  */
 
 import { getOpenAIKey } from '@/lib/openai-key';
+import { timeoutSignal } from './abort';
 
 /** Hard cap from the OpenAI API. */
 const OPENAI_TTS_INPUT_MAX = 4096;
@@ -79,31 +80,43 @@ export function chunkForTts(text: string): string[] {
   return chunks;
 }
 
+/**
+ * Per-chunk hard timeout. tts-1 typically returns in 1-3s for one
+ * chunk; 60s is generous but bounded. Without this, a hung connection
+ * silently freezes the whole build because nothing else times out.
+ */
+const TTS_CHUNK_TIMEOUT_MS = 60_000;
+
 async function renderChunk(
   apiKey: string,
   text: string,
   opts: RenderOptions,
 ): Promise<ArrayBuffer> {
-  const res = await fetch('https://api.openai.com/v1/audio/speech', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: opts.model ?? 'tts-1',
-      voice: opts.voice ?? 'alloy',
-      input: text,
-      response_format: 'mp3',
-      speed: opts.speed ?? 1.0,
-    }),
-    signal: opts.signal,
-  });
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => '');
-    throw new Error(`OpenAI TTS HTTP ${res.status}: ${errorText.slice(0, 200)}`);
+  const { signal, cleanup } = timeoutSignal(opts.signal, TTS_CHUNK_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: opts.model ?? 'tts-1',
+        voice: opts.voice ?? 'alloy',
+        input: text,
+        response_format: 'mp3',
+        speed: opts.speed ?? 1.0,
+      }),
+      signal,
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(`OpenAI TTS HTTP ${res.status}: ${errorText.slice(0, 200)}`);
+    }
+    return await res.arrayBuffer();
+  } finally {
+    cleanup();
   }
-  return res.arrayBuffer();
 }
 
 /**
@@ -259,26 +272,25 @@ export async function renderTurnsToSegment(
     buffersPerTurn[i] = out;
   });
 
-  // Measure each turn's duration before concatenating, so we don't have
-  // to re-decode the final blob to split it back.
+  // Measure each turn's duration in parallel. measureMp3Duration spins
+  // up its own hidden HTMLAudioElement per call, so they don't interfere.
+  // Sequential measurement added ~50-150ms × N to total render time;
+  // parallel collapses it to ~max single measurement (~150ms).
+  const durations = await Promise.all(buffersPerTurn.map(async (bufs, i) => {
+    if (!bufs || bufs.length === 0) return 0;
+    try {
+      return await measureMp3Duration(new Blob(bufs, { type: 'audio/mpeg' }));
+    } catch {
+      // Fallback to word-count estimate if metadata load fails.
+      return Math.max(0.5, (turns[i].text.split(/\s+/).length / 150) * 60 / (opts.speed ?? 1));
+    }
+  }));
+  // Cumulative-sum to derive each turn's start offset.
   const timings: Array<{ startSec: number; durationSec: number }> = [];
   let acc = 0;
-  for (let i = 0; i < turns.length; i++) {
-    const bufs = buffersPerTurn[i];
-    if (!bufs || bufs.length === 0) {
-      timings.push({ startSec: acc, durationSec: 0 });
-      continue;
-    }
-    const turnBlob = new Blob(bufs, { type: 'audio/mpeg' });
-    let dur = 0;
-    try {
-      dur = await measureMp3Duration(turnBlob);
-    } catch {
-      // Fallback to text-length estimate if metadata load fails.
-      dur = Math.max(0.5, (turns[i].text.split(/\s+/).length / 150) * 60 / (opts.speed ?? 1));
-    }
-    timings.push({ startSec: acc, durationSec: dur });
-    acc += dur;
+  for (const d of durations) {
+    timings.push({ startSec: acc, durationSec: d });
+    acc += d;
   }
 
   const allBuffers: ArrayBuffer[] = [];

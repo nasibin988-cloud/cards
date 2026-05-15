@@ -455,20 +455,22 @@ function Chip({
 }
 
 function ProgressLine({ event }: { event: BuildEvent }) {
+  // With the pipelined orchestrator, scripting and rendering interleave,
+  // so we show ONE progress bar driven by rendered/total (the slower
+  // pool) plus a sub-label exposing the script pool's progress too.
   const message = (() => {
     switch (event.stage) {
       case 'projecting': return 'Pulling cards in scope…';
       case 'planning':   return `Planning structure (${event.cardCount} cards)…`;
-      case 'planned':    return `Plan ready: ${event.plan.segments.length} segments, ~$${event.estCostUsd.toFixed(2)}. Scripting…`;
-      case 'scripting':  return `Writing segments ${event.done}/${event.total}…`;
-      case 'rendering':  return `Rendering audio ${event.done}/${event.total}…`;
+      case 'planned':    return `Plan ready: ${event.plan.segments.length} segments, ~$${event.estCostUsd.toFixed(2)}. Building…`;
+      case 'progress':   return `Writing ${event.scriptedDone}/${event.total} · Rendering ${event.renderedDone}/${event.total}`;
       case 'ready':      return 'Ready. Opening player…';
       case 'aborted':    return 'Build cancelled.';
       case 'error':      return `Error: ${event.message}`;
     }
   })();
-  const progress = event.stage === 'scripting' || event.stage === 'rendering'
-    ? Math.round((event.done / Math.max(event.total, 1)) * 100)
+  const progress = event.stage === 'progress'
+    ? Math.round((event.renderedDone / Math.max(event.total, 1)) * 100)
     : null;
   return (
     <div className="space-y-1.5">

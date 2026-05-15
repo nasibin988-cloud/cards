@@ -16,9 +16,13 @@
 import { makeAnthropicClient } from '@/lib/ai/client';
 import { getSetting } from '@/lib/db/queries';
 import { renderPlain } from '@/lib/cloze/parser';
+import { timeoutSignal } from '@/lib/podcast/abort';
 import type { Note, TalkTurn } from '@/lib/db/schema';
 
 const CHAT_MODEL = 'claude-opus-4-7';
+
+/** Per-turn chat timeout. 90s is generous for a 1024-token reply. */
+const CHAT_TIMEOUT_MS = 90_000;
 
 const SYSTEM_PROMPT = `You are a study partner having a real voice conversation with a learner. The curriculum below is a set of flashcards the learner is preparing to study. You and the learner discuss this material together.
 
@@ -76,15 +80,21 @@ export async function generateAssistantReply(
     content: t.text,
   }));
 
-  const response = await client.messages.create(
-    {
-      model: CHAT_MODEL,
-      max_tokens: 1024,
-      system,
-      messages,
-    },
-    signal ? { signal } : undefined,
-  );
+  const { signal: timedSignal, cleanup } = timeoutSignal(signal, CHAT_TIMEOUT_MS);
+  let response;
+  try {
+    response = await client.messages.create(
+      {
+        model: CHAT_MODEL,
+        max_tokens: 1024,
+        system,
+        messages,
+      },
+      { signal: timedSignal },
+    );
+  } finally {
+    cleanup();
+  }
 
   const text = response.content
     .map(b => (b.type === 'text' ? b.text : ''))

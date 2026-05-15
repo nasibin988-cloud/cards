@@ -12,6 +12,10 @@
  */
 
 import { getOpenAIKey } from '@/lib/openai-key';
+import { timeoutSignal } from '@/lib/podcast/abort';
+
+/** Whisper is slower than TTS; allow up to 90s for a long recording. */
+const WHISPER_TIMEOUT_MS = 90_000;
 
 export async function transcribeAudio(
   blob: Blob,
@@ -29,16 +33,21 @@ export async function transcribeAudio(
   form.append('model', 'whisper-1');
   if (opts.language) form.append('language', opts.language);
 
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}` },
-    body: form,
-    signal: opts.signal,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Whisper HTTP ${res.status}: ${text.slice(0, 200)}`);
+  const { signal, cleanup } = timeoutSignal(opts.signal, WHISPER_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      body: form,
+      signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Whisper HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const json = (await res.json()) as { text?: string };
+    return String(json.text ?? '').trim();
+  } finally {
+    cleanup();
   }
-  const json = (await res.json()) as { text?: string };
-  return String(json.text ?? '').trim();
 }

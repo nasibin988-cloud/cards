@@ -127,8 +127,7 @@ function progressLabel(ev: BuildEvent): string {
     case 'projecting': return 'pulling cards…';
     case 'planning':   return `planning (${ev.cardCount} cards)…`;
     case 'planned':    return `plan ready (${ev.plan.segments.length} segments)…`;
-    case 'scripting':  return `writing segments ${ev.done}/${ev.total}…`;
-    case 'rendering':  return `rendering audio ${ev.done}/${ev.total}…`;
+    case 'progress':   return `writing ${ev.scriptedDone}/${ev.total} · rendering ${ev.renderedDone}/${ev.total}`;
     case 'ready':      return 'done.';
     case 'aborted':    return 'cancelled.';
     case 'error':      return `error: ${ev.message}`;

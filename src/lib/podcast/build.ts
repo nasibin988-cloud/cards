@@ -1,21 +1,28 @@
 /**
- * Orchestrator: project → plan → script → render.
+ * Orchestrator: project → plan → pipeline(script + render).
  *
  * The build is broken into discrete stages, each one persisting its
  * output before the next runs. If the user closes the tab mid-build,
- * the partial state survives on disk and `resumePodcastBuild()` can
- * pick up from the first incomplete stage. The script + render stages
- * fail per-segment (not for the whole batch) so a single Opus or TTS
- * blip never invalidates everything that succeeded.
+ * partial state survives on disk and `resumePodcastBuild()` picks up
+ * from the first incomplete stage. The script + render stages fail
+ * per-segment (not for the whole batch), so a single Opus or TTS
+ * blip never invalidates the rest.
  *
- * Progress is reported via a single `onEvent` callback so the page
- * shows a live status line without each stage needing its own
- * subscription wire. An `AbortSignal` threaded into every external
- * call cancels the build mid-flight.
+ * The big shape change vs. v1: script and render run as ONE PIPELINE
+ * through two concurrency pools. As soon as segment N's script lands,
+ * segment N's render kicks off — without waiting for the rest of the
+ * script pass to finish. Combined with bumped concurrencies (6 script,
+ * 3 render) this is the ~3× speedup over the v1 two-phase approach.
+ *
+ * Every external call is wrapped in a per-request timeout via the
+ * `timeoutSignal` watchdog, so a single hung connection can't freeze
+ * the whole build (the bug that stalled a real run at 5/7).
+ *
+ * Progress is reported through a single `onEvent` callback with a
+ * `progress` event carrying both `scriptedDone` + `renderedDone`.
  */
 
 import { id as ulid } from '@/lib/ulid';
-import { db } from '@/lib/db/dexie';
 import type {
   Podcast,
   PodcastAudioStyle,
@@ -24,7 +31,6 @@ import type {
   PodcastMode,
   PodcastSegment,
   PodcastTtsProvider,
-  PodcastTurn,
 } from '@/lib/db/schema';
 import {
   createPodcast,
@@ -40,31 +46,33 @@ import {
 } from '@/lib/db/podcast-queries';
 import { projectQueue } from './queue-projection';
 import { planPodcast, type PodcastPlan, type PlannedSegment } from './plan';
-import { scriptAllSegments, scriptSingleSegment, type ScriptedSegment } from './script';
+import { scriptSingleSegment } from './script';
 import { renderTurnsToSegment, type OpenAIVoice, type OpenAITtsModel } from './tts-openai';
 import { WORDS_PER_MINUTE } from './plan';
+import { Pool } from './abort';
+
+/** Pipeline concurrency caps. Script pool is the Opus side; render pool
+ *  is the OpenAI TTS side. They run independently, so a script that
+ *  lands first immediately moves to render even while later scripts are
+ *  still in flight. */
+const SCRIPT_PARALLEL = 6;
+const RENDER_PARALLEL = 3;
 
 export interface BuildInput {
   name?: string;
   deckIds: string[];
   mode?: PodcastMode;
   horizon: PodcastHorizon;
-  /** Tag filter applied to the projection (preview mode). */
   tagFilter?: string[];
-  /** Practice-query scope (preview mode). */
   practiceQueryId?: string;
-  /** Requested length in seconds. */
   targetSeconds: number;
   depthOverride?: PodcastDepth | null;
   ttsProvider: PodcastTtsProvider;
   voiceA?: OpenAIVoice;
   voiceB?: OpenAIVoice;
   ttsModel?: OpenAITtsModel;
-  /** Default 1.0; OpenAI TTS speed parameter applied at render time. */
   speed?: number;
-  /** Audio finishing applied at playback time. */
   audioStyle?: PodcastAudioStyle;
-  /** Optional name override. */
   signal?: AbortSignal;
 }
 
@@ -72,8 +80,7 @@ export type BuildEvent =
   | { stage: 'projecting' }
   | { stage: 'planning'; cardCount: number }
   | { stage: 'planned'; podcastId: string; plan: PodcastPlan; estCostUsd: number }
-  | { stage: 'scripting'; done: number; total: number }
-  | { stage: 'rendering'; done: number; total: number; segmentIndex: number }
+  | { stage: 'progress'; scriptedDone: number; renderedDone: number; total: number }
   | { stage: 'ready'; podcastId: string }
   | { stage: 'error'; message: string }
   | { stage: 'aborted'; podcastId: string };
@@ -82,23 +89,13 @@ export interface BuildResult {
   podcastId: string;
 }
 
-/**
- * Estimate render cost in USD from total script characters (final
- * accuracy comes from the script pass itself). Returns 0 for the
- * browser fallback.
- */
 function estCostFromChars(chars: number, model: OpenAITtsModel | undefined): number {
   const per1M = (model === 'tts-1-hd') ? 30 : 15;
   return (chars / 1_000_000) * per1M;
 }
 
-/**
- * Build one podcast end-to-end. Returns the podcast id once status
- * reaches 'ready' (or throws if planning produced nothing usable).
- * Render failures on individual segments are recorded per-segment but
- * do not throw, so the listener still gets the segments that
- * succeeded. Honors `signal` for full-build cancellation.
- */
+/* ─── Public API ───────────────────────────────────────────────── */
+
 export async function buildPodcast(
   input: BuildInput,
   onEvent?: (e: BuildEvent) => void,
@@ -123,10 +120,8 @@ export async function buildPodcast(
       emit({ stage: 'error', message: msg });
       throw new Error(msg);
     }
-    // Substitute the filtered list back in so plan + script see only those.
     const scopedProjection = { ...projection, cards };
 
-    // Materialise the Podcast row immediately so the library shows it.
     const podcast: Podcast = await createPodcast({
       id: podcastId,
       name: input.name?.trim() || autoName(projection.decksById, input.horizon, cards.length),
@@ -148,7 +143,7 @@ export async function buildPodcast(
 
     if (signal?.aborted) throw new AbortError();
     emit({ stage: 'planning', cardCount: cards.length });
-    const plan = await planPodcast(scopedProjection, input.targetSeconds, depthOverride);
+    const plan = await planPodcast(scopedProjection, input.targetSeconds, depthOverride, signal);
 
     const segmentRows: PodcastSegment[] = plan.segments.map((s, i) => ({
       id: ulid(),
@@ -166,8 +161,6 @@ export async function buildPodcast(
     await putSegments(segmentRows);
     await updatePodcast(podcastId, { name: plan.title || podcast.name });
 
-    // Cost preview event. Rough at this point (real char count lands
-    // after scripting); we use word-count × 5.5 as the char proxy.
     const estChars = plan.totalTargetWords * 5.5;
     const estCost = input.ttsProvider === 'openai'
       ? estCostFromChars(estChars, input.ttsModel)
@@ -176,97 +169,44 @@ export async function buildPodcast(
 
     if (signal?.aborted) throw new AbortError();
     await setPodcastStatus(podcastId, 'scripting');
-    emit({ stage: 'scripting', done: 0, total: segmentRows.length });
 
-    const scripted = await scriptAllSegments(
-      plan.segments,
-      plan.title || podcast.name,
-      (done, total) => emit({ stage: 'scripting', done, total }),
-      signal,
-    );
-
-    // Persist each scripted segment (or its error). Intro from the plan
-    // is prepended to segment 0 as an A-turn so the listener doesn't
-    // miss it (the script prompt forbids intros from inside segments).
-    let totalChars = 0;
-    for (let i = 0; i < scripted.length; i++) {
-      const s = scripted[i];
-      const row = segmentRows[i];
-      if (s.error) {
-        await setSegmentStatus(row.id, 'error', {
-          turns: [],
-          script: '',
-          transition: '',
-          error: s.error,
-        });
-      } else {
-        const turns = i === 0 && plan.intro
-          ? [{ speaker: 'A' as const, text: plan.intro }, ...s.turns, { speaker: s.transition.speaker, text: s.transition.text }]
-          : [...s.turns, { speaker: s.transition.speaker, text: s.transition.text }];
-        const transcript = turns.map(t => `${t.speaker}: ${t.text}`).join('\n\n');
-        totalChars += transcript.length;
-        await updateSegment(row.id, {
-          turns,
-          script: transcript,
-          transition: s.transition.text,
-          status: 'scripted',
-        });
-      }
-    }
-    await updatePodcast(podcastId, { totalChars });
+    // Build the task list: every segment needs script-then-render. The
+    // intro from the plan rides as the first turn of segment 0 so the
+    // listener actually hears it (the script prompt forbids intros in
+    // segment bodies).
+    const reloadedPodcast = (await getPodcast(podcastId))!;
+    const tasks: SegmentTask[] = segmentRows.map((row, i) => ({
+      kind: 'script',
+      segRow: row,
+      plannedSeg: plan.segments[i],
+      nextTitle: i + 1 < segmentRows.length ? plan.segments[i + 1].title : null,
+      prependIntro: i === 0 && plan.intro ? plan.intro : undefined,
+    }));
+    await pipeline(reloadedPodcast, tasks, signal, emit);
 
     if (signal?.aborted) throw new AbortError();
-    await setPodcastStatus(podcastId, 'rendering');
-
-    if (input.ttsProvider === 'openai') {
-      await renderAllSegments(podcastId, input, signal, (done, total, segmentIndex) =>
-        emit({ stage: 'rendering', done, total, segmentIndex }),
-      );
-    } else {
-      // Browser TTS: mark segments rendered, approximate durations.
-      const segs = await listSegments(podcastId);
-      segs.sort((a, b) => a.index - b.index);
-      let durationAcc = 0;
-      for (const seg of segs) {
-        if (seg.status === 'error') continue;
-        const text = (seg.turns ?? []).map(t => t.text).join(' ');
-        const words = text.split(/\s+/).filter(Boolean).length;
-        const approx = (words / WORDS_PER_MINUTE) * 60;
-        await updateSegment(seg.id, { status: 'rendered', durationSec: approx });
-        durationAcc += approx;
-      }
-      await updatePodcast(podcastId, { durationSec: durationAcc });
-    }
-
-    if (signal?.aborted) throw new AbortError();
+    await finaliseAggregates(podcastId);
     await setPodcastStatus(podcastId, 'ready', { completedAt: Date.now() });
     emit({ stage: 'ready', podcastId });
     return { podcastId };
   } catch (err) {
     if (err instanceof AbortError || (err instanceof Error && err.name === 'AbortError')) {
       const existing = await getPodcast(podcastId);
-      if (existing) {
-        await setPodcastStatus(podcastId, 'error', { error: 'Build cancelled' });
-      }
+      if (existing) await setPodcastStatus(podcastId, 'error', { error: 'Build cancelled' });
       emit({ stage: 'aborted', podcastId });
       throw err;
     }
     const msg = err instanceof Error ? err.message : String(err);
     const existing = await getPodcast(podcastId);
-    if (existing) {
-      await setPodcastStatus(podcastId, 'error', { error: msg });
-    }
+    if (existing) await setPodcastStatus(podcastId, 'error', { error: msg });
     emit({ stage: 'error', message: msg });
     throw err;
   }
 }
 
 /**
- * Pick up an interrupted build. Inspects current segment statuses and
- * re-runs only what's missing:
- *   - segments at 'planned' (no script): re-script + re-render
- *   - segments at 'scripted'  (no audio): re-render only
- *   - segments at 'rendered' or 'error': left alone unless retryErrors
+ * Pick up an interrupted (or errored) build. Inspects current segment
+ * statuses and pipelines only the work that's missing.
  */
 export async function resumePodcastBuild(
   podcastId: string,
@@ -283,80 +223,54 @@ export async function resumePodcastBuild(
 
   await setPodcastStatus(podcastId, 'scripting');
 
-  // Re-script anything that's missing a body (status 'planned' or
-  // 'error' when retryErrors).
-  const needsScript = segs.filter(s =>
-    s.status === 'planned'
-    || (options.retryErrors && s.status === 'error'),
-  );
-  if (needsScript.length > 0) {
-    let done = 0;
-    emit({ stage: 'scripting', done, total: needsScript.length });
-    for (const row of needsScript) {
-      if (signal?.aborted) throw new AbortError();
-      const plannedShape: PlannedSegment = {
-        title: row.title,
-        description: row.description,
-        cardIds: row.cardIds,
-        depth: row.depth,
-        targetWords: row.targetWords,
-      };
-      try {
-        const next = row.index + 1 < segs.length ? segs[row.index + 1].title : null;
-        const s = await scriptSingleSegment(plannedShape, row.index, segs.length, next, podcast.name, signal);
-        const turns = [...s.turns, { speaker: s.transition.speaker, text: s.transition.text }];
-        const transcript = turns.map(t => `${t.speaker}: ${t.text}`).join('\n\n');
-        await updateSegment(row.id, {
-          turns,
-          script: transcript,
-          transition: s.transition.text,
-          status: 'scripted',
-          error: undefined,
-        });
-      } catch (err) {
-        await setSegmentStatus(row.id, 'error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      done++;
-      emit({ stage: 'scripting', done, total: needsScript.length });
+  // Build the task list: each segment becomes a 'script' task (if no
+  // body yet) or a 'render-only' task (body but no audio). Already-
+  // rendered segments are skipped entirely.
+  const tasks: SegmentTask[] = [];
+  for (const seg of segs) {
+    const isRendered = seg.status === 'rendered';
+    if (isRendered) continue;
+    const wantsRetry = options.retryErrors && seg.status === 'error';
+    const needsScript = seg.status === 'planned' || (wantsRetry && (seg.turns?.length ?? 0) === 0);
+    const needsRender = seg.status === 'scripted' || (wantsRetry && (seg.turns?.length ?? 0) > 0);
+    if (!needsScript && !needsRender) continue;
+    const nextTitle = seg.index + 1 < segs.length ? segs[seg.index + 1].title : null;
+    if (needsScript) {
+      tasks.push({
+        kind: 'script',
+        segRow: seg,
+        plannedSeg: {
+          title: seg.title,
+          description: seg.description,
+          cardIds: seg.cardIds,
+          depth: seg.depth,
+          targetWords: seg.targetWords,
+        },
+        nextTitle,
+      });
+    } else {
+      tasks.push({ kind: 'render-only', segRow: seg, nextTitle });
     }
   }
 
-  // Re-render anything that's missing audio (OpenAI mode only).
-  if (podcast.ttsProvider === 'openai') {
-    await setPodcastStatus(podcastId, 'rendering');
-    const fresh = await listSegments(podcastId);
-    fresh.sort((a, b) => a.index - b.index);
-    const needsRender = fresh.filter(s =>
-      (s.status === 'scripted')
-      || (options.retryErrors && s.status === 'error' && (s.turns?.length ?? 0) > 0),
-    );
-    let done = 0;
-    const total = needsRender.length;
-    if (total > 0) emit({ stage: 'rendering', done, total, segmentIndex: needsRender[0].index });
-    for (const seg of needsRender) {
-      if (signal?.aborted) throw new AbortError();
-      try {
-        await renderSegmentAudio(podcast, seg, signal);
-      } catch (err) {
-        await setSegmentStatus(seg.id, 'error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      done++;
-      emit({ stage: 'rendering', done, total, segmentIndex: seg.index });
-    }
+  if (tasks.length === 0) {
+    await setPodcastStatus(podcastId, 'ready', { completedAt: Date.now() });
+    emit({ stage: 'ready', podcastId });
+    return;
   }
 
-  // Refresh aggregates.
-  const final = await listSegments(podcastId);
-  final.sort((a, b) => a.index - b.index);
-  const durationSec = final.reduce((acc, s) => acc + (s.durationSec ?? 0), 0);
-  const totalBytes = await totalAudioBytes(podcastId);
-  await updatePodcast(podcastId, { durationSec, totalBytes });
-  await setPodcastStatus(podcastId, 'ready', { completedAt: Date.now() });
-  emit({ stage: 'ready', podcastId });
+  try {
+    await pipeline(podcast, tasks, signal, emit);
+    await finaliseAggregates(podcastId);
+    await setPodcastStatus(podcastId, 'ready', { completedAt: Date.now() });
+    emit({ stage: 'ready', podcastId });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      emit({ stage: 'aborted', podcastId });
+      throw err;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -406,44 +320,124 @@ export async function retrySegment(
       durationSec: (words / WORDS_PER_MINUTE) * 60,
     });
   }
+
+  await finaliseAggregates(podcastId);
 }
 
-/* ─── Internals ────────────────────────────────────────────────── */
+/* ─── Pipeline core ────────────────────────────────────────────── */
 
-async function renderAllSegments(
-  podcastId: string,
-  input: BuildInput,
+interface ScriptTask {
+  kind: 'script';
+  segRow: PodcastSegment;
+  plannedSeg: PlannedSegment;
+  nextTitle: string | null;
+  /** Inject this string as the first A-turn (used for the plan's intro). */
+  prependIntro?: string;
+}
+interface RenderOnlyTask {
+  kind: 'render-only';
+  segRow: PodcastSegment;
+  nextTitle: string | null;
+}
+type SegmentTask = ScriptTask | RenderOnlyTask;
+
+/**
+ * Run a list of tasks through the script and render pools. Tasks
+ * progress through their phases independently of each other; a finished
+ * script immediately hands off to a render slot if one is free, so the
+ * stages overlap.
+ *
+ * Per-task failures are recorded on the segment row (`error` + status
+ * 'error') and do NOT abort the rest of the pipeline. Only an
+ * AbortError from the signal propagates.
+ */
+async function pipeline(
+  podcast: Podcast,
+  tasks: SegmentTask[],
   signal: AbortSignal | undefined,
-  onEach: (done: number, total: number, segmentIndex: number) => void,
+  emit: (e: BuildEvent) => void,
 ): Promise<void> {
-  const podcast = await getPodcast(podcastId);
-  if (!podcast) throw new Error('Podcast vanished mid-build.');
-  const segs = await listSegments(podcastId);
-  segs.sort((a, b) => a.index - b.index);
-  const renderable = segs.filter(s => s.status === 'scripted' && (s.turns?.length ?? 0) > 0);
-  const total = renderable.length;
-  let done = 0;
-  let durationAcc = 0;
-  for (const seg of renderable) {
-    if (signal?.aborted) throw new AbortError();
-    try {
-      const dur = await renderSegmentAudio(podcast, seg, signal);
-      durationAcc += dur;
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw err;
-      await setSegmentStatus(seg.id, 'error', {
-        error: err instanceof Error ? err.message : String(err),
+  const scriptPool = new Pool(SCRIPT_PARALLEL);
+  const renderPool = new Pool(RENDER_PARALLEL);
+  const total = tasks.length;
+  let scriptedDone = tasks.filter(t => t.kind === 'render-only').length;
+  let renderedDone = 0;
+  const reportProgress = () =>
+    emit({ stage: 'progress', scriptedDone, renderedDone, total });
+
+  reportProgress();
+
+  const doTask = async (task: SegmentTask): Promise<void> => {
+    const segRow = task.segRow;
+    let turns = segRow.turns ?? [];
+
+    /* ─── Script phase ─── */
+    if (task.kind === 'script') {
+      try {
+        if (signal?.aborted) throw new AbortError();
+        const scripted = await scriptPool.run(() => scriptSingleSegment(
+          task.plannedSeg, segRow.index, total, task.nextTitle, podcast.name, signal,
+        ));
+        const introTurn = task.prependIntro
+          ? [{ speaker: 'A' as const, text: task.prependIntro }]
+          : [];
+        turns = [
+          ...introTurn,
+          ...scripted.turns,
+          { speaker: scripted.transition.speaker, text: scripted.transition.text },
+        ];
+        const transcript = turns.map(t => `${t.speaker}: ${t.text}`).join('\n\n');
+        await updateSegment(segRow.id, {
+          turns,
+          script: transcript,
+          transition: scripted.transition.text,
+          status: 'scripted',
+          error: undefined,
+        });
+      } catch (err) {
+        if (err instanceof AbortError || (err instanceof Error && err.name === 'AbortError')) {
+          throw err;
+        }
+        await setSegmentStatus(segRow.id, 'error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        scriptedDone++;
+        renderedDone++;
+        reportProgress();
+        return;
+      }
+      scriptedDone++;
+      reportProgress();
+    }
+
+    /* ─── Render phase ─── */
+    if (podcast.ttsProvider === 'openai') {
+      try {
+        if (signal?.aborted) throw new AbortError();
+        const segForRender: PodcastSegment = { ...segRow, turns };
+        await renderPool.run(() => renderSegmentAudio(podcast, segForRender, signal));
+      } catch (err) {
+        if (err instanceof AbortError || (err instanceof Error && err.name === 'AbortError')) {
+          throw err;
+        }
+        await setSegmentStatus(segRow.id, 'error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      // Browser-TTS: no audio bytes, just approximate duration so the
+      // library/podcast page show a useful total.
+      const words = turns.map(t => t.text).join(' ').split(/\s+/).filter(Boolean).length;
+      await updateSegment(segRow.id, {
+        status: 'rendered',
+        durationSec: (words / WORDS_PER_MINUTE) * 60,
       });
     }
-    done++;
-    onEach(done, total, seg.index);
-  }
-  // Skipped segments (status 'error') contribute 0 duration.
-  for (const seg of segs) {
-    if (seg.status === 'rendered' && seg.durationSec) durationAcc += seg.durationSec;
-  }
-  const totalBytes = await totalAudioBytes(podcastId);
-  await updatePodcast(podcastId, { durationSec: durationAcc, totalBytes });
+    renderedDone++;
+    reportProgress();
+  };
+
+  await Promise.all(tasks.map(doTask));
 }
 
 /**
@@ -467,13 +461,13 @@ async function renderSegmentAudio(
     {
       voiceA,
       voiceB,
-      model: 'tts-1', // user can override via Podcast.ttsModel in a later iteration
+      model: 'tts-1',
       speed: 1.0,
       signal,
     },
   );
   await putSegmentAudio(podcast.id, seg.index, 'audio/mpeg', result.blob);
-  const stampedTurns: PodcastTurn[] = turns.map((t, i) => ({
+  const stampedTurns = turns.map((t, i) => ({
     speaker: t.speaker,
     text: t.text,
     startSec: result.timings[i]?.startSec ?? 0,
@@ -486,6 +480,24 @@ async function renderSegmentAudio(
     error: undefined,
   });
   return result.totalDurationSec;
+}
+
+/**
+ * After the pipeline completes, recompute the podcast row's
+ * aggregates (totalChars, durationSec, totalBytes) so the library tile
+ * + player chrome show correct numbers.
+ */
+async function finaliseAggregates(podcastId: string): Promise<void> {
+  const segs = await listSegments(podcastId);
+  segs.sort((a, b) => a.index - b.index);
+  let totalChars = 0;
+  let durationSec = 0;
+  for (const s of segs) {
+    totalChars += (s.script ?? '').length;
+    durationSec += s.durationSec ?? 0;
+  }
+  const totalBytes = await totalAudioBytes(podcastId);
+  await updatePodcast(podcastId, { totalChars, durationSec, totalBytes });
 }
 
 class AbortError extends Error {
@@ -514,3 +526,4 @@ function autoName(
     : 'all cards';
   return `${deckPart} (${horizonPart}, ${cardCount} cards)`;
 }
+
