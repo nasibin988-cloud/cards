@@ -8,10 +8,14 @@ import type {
   Highlight,
   Media,
   Note,
+  Podcast,
+  PodcastAudio,
+  PodcastSegment,
   PracticeQuery,
   ReviewLog,
   Setting,
   Source,
+  TalkSession,
 } from './schema';
 import { markDirty } from '@/lib/sync/dirty';
 
@@ -43,6 +47,10 @@ export class CardsDB extends Dexie {
   sources!: Table<Source, string>;
   highlights!: Table<Highlight, string>;
   feynmanLogs!: Table<FeynmanLog, string>;
+  podcasts!: Table<Podcast, string>;
+  podcastSegments!: Table<PodcastSegment, string>;
+  podcastAudio!: Table<PodcastAudio, string>;
+  talkSessions!: Table<TalkSession, string>;
 
   constructor() {
     super('cards-v1');
@@ -76,6 +84,27 @@ export class CardsDB extends Dexie {
     // v6 adds Feynman-mode attempts: per-card explanation log with grade.
     this.version(6).stores({
       feynmanLogs: 'id, cardId, noteId, deckId, createdAt, [cardId+createdAt]',
+    });
+    // v7 adds audio priming (podcast) tables. `podcastAudio.pk` is a
+    // compound `<podcastId>::<segmentIndex>` so we can list-by-podcast
+    // cheaply and avoid storing the blob itself in segments (which we
+    // want to keep small and queryable).
+    this.version(7).stores({
+      podcasts: 'id, status, createdAt',
+      podcastSegments: 'id, podcastId, [podcastId+index]',
+      podcastAudio: 'pk, podcastId',
+    });
+    // v8 indexes Card.lastPrimedAt so Reviewer can cheaply discover
+    // which cards were narrated past in a recent podcast and surface a
+    // "primed" indicator. No data migration needed (existing rows just
+    // have the field unset, treated as not primed).
+    this.version(8).stores({
+      cards: 'id, deckId, noteId, due, state, suspended, buried, lastPrimedAt, [deckId+state], [deckId+due]',
+    });
+    // v9 adds talkSessions (Socratic voice-loop sessions). Stored locally
+    // only; audio is not persisted (real-time only) so the row stays small.
+    this.version(9).stores({
+      talkSessions: 'id, startedAt, endedAt',
     });
 
     // Auto-sync dirty hooks. Any create/update/delete on user-data tables

@@ -1438,7 +1438,10 @@ export async function recordReview(
   opts: SchedulerOptions = {},
 ): Promise<{ updatedCard: Card; log: ReviewLog; siblingsBurried: number }> {
   const { cardPatch, log } = applyRating(card, rating, durationMs, opts);
-  const updatedCard: Card = { ...card, ...cardPatch };
+  // Reviewing a card clears its "primed by podcast" mark. The indicator
+  // exists to tell the user "you just heard about this"; once they've
+  // actually studied it, the priming has been spent.
+  const updatedCard: Card = { ...card, ...cardPatch, lastPrimedAt: undefined };
   const dbi = db();
 
   // Sibling-bury for cloze: hide the other cards of the same note for the rest

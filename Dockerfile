@@ -27,6 +27,12 @@ FROM node:20-alpine AS build
 WORKDIR /app
 ARG BASE_PATH=""
 ENV NEXT_PUBLIC_BASE_PATH=$BASE_PATH
+# Optional baked-in OpenAI key. Read from /opt/cards/.env on the host
+# via docker-compose build args; left unset in dev and on the launchctl
+# service so those default to the Settings UI path. NEXT_PUBLIC_ is
+# necessary because the OpenAI calls happen in the browser bundle.
+ARG OPENAI_API_KEY=""
+ENV NEXT_PUBLIC_OPENAI_API_KEY=$OPENAI_API_KEY
 # Standalone build packages a tiny Node server next to the .next/ output
 # so the runtime stage doesn't need node_modules.
 ENV STANDALONE_BUILD=true

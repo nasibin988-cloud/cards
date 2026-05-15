@@ -21,6 +21,8 @@ const NAV: NavItem[] = [
   { href: '/', label: 'Decks' },
   { href: '/map', label: 'Map' },
   { href: '/read', label: 'Read' },
+  { href: '/podcast', label: 'Listen' },
+  { href: '/talk', label: 'Talk' },
   { href: '/import', label: 'Import' },
   { href: '/generate', label: 'Generate' },
   { href: '/sessions', label: 'Sessions' },

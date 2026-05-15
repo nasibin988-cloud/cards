@@ -1423,6 +1423,20 @@ export default function Reviewer({ deck, noteIdFilter, virtualScope }: Props) {
               title={`Flag: ${FLAG_LABEL[note.flag]} (press F to cycle)`}
             />
           )}
+          {/* "Primed" pip: this card was narrated in a podcast within the
+              last 7 days. Cleared on review. Quiet visual: a small saffron
+              dot, no label, hover tooltip explains it. */}
+          {card?.lastPrimedAt && Date.now() - card.lastPrimedAt < 7 * 24 * 3600 * 1000 && (
+            <Tooltip
+              content="Heard about this in a podcast recently. The mark clears when you rate the card."
+              side="bottom"
+            >
+              <span
+                aria-label="Primed by podcast"
+                className="inline-flex items-center justify-center w-2 h-2 rounded-full bg-saffron-400/80 shadow-[0_0_8px_rgba(217,176,99,0.6)]"
+              />
+            </Tooltip>
+          )}
         </div>
         {/* Middle stats group is absolutely positioned so it centers on the
             viewport, NOT in the leftover space between deck-name and ASK

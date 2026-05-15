@@ -48,6 +48,8 @@ export default function SettingsPage() {
   const [examDate, setExamDate] = useState('');
   const [forecastThreshold, setForecastThreshold] = useState('0.6');
   const [forecastThresholdError, setForecastThresholdError] = useState<string | null>(null);
+  const [openaiDraft, setOpenaiDraft] = useState('');
+  const [openaiStored, setOpenaiStored] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -72,6 +74,8 @@ export default function SettingsPage() {
       const ed = await getSetting('exam_date');
       const ft = await getJsonSetting<number>('forecast_threshold', 0.6);
       if (k) { setKeyDraft(k); setKeyStored(true); }
+      const oa = await getSetting('openai_api_key');
+      if (oa) { setOpenaiDraft(oa); setOpenaiStored(true); }
       if (m) setModel(m);
       if (r) setRetention(r);
       if (lt) setLeechThreshold(lt);
@@ -242,6 +246,18 @@ export default function SettingsPage() {
     setKeyStored(false);
   };
 
+  const saveOpenAI = async () => {
+    if (!openaiDraft.trim()) return;
+    await setSetting('openai_api_key', openaiDraft.trim());
+    setOpenaiStored(true);
+  };
+  const clearOpenAI = async () => {
+    await db().settings.delete('openai_api_key');
+    setOpenaiStored(false);
+    setOpenaiDraft('');
+  };
+  const editOpenAI = () => setOpenaiStored(false);
+
   const test = async () => {
     setTesting(true);
     setTestResult(null);
@@ -343,6 +359,34 @@ export default function SettingsPage() {
           >
             {MODEL_OPTIONS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
+        </label>
+      </Section>
+
+      <Section title="OpenAI API" subtitle="Used by Listen / podcast TTS. Optional; podcasts fall back to browser speech without it.">
+        <label className="block">
+          <div className="text-2xs uppercase tracking-widest text-dark-400 mb-1.5">API key</div>
+          <div className="flex gap-2">
+            <input
+              type={openaiStored ? 'text' : 'password'}
+              value={openaiStored ? maskKey(openaiDraft) : openaiDraft}
+              onChange={e => { setOpenaiDraft(e.target.value); setOpenaiStored(false); }}
+              placeholder="sk-…"
+              readOnly={openaiStored}
+              className="flex-1 bg-dark-800/30 rounded-xl px-4 py-2.5 text-sm text-dark-100 placeholder:text-dark-500 outline-none focus:bg-dark-800/50 transition border border-white/[0.04] font-mono read-only:cursor-default"
+            />
+            {!openaiStored ? (
+              <button onClick={saveOpenAI} disabled={!openaiDraft.trim()} className="btn-gradient px-4 py-2 rounded-xl text-sm">Save</button>
+            ) : (
+              <>
+                <button onClick={editOpenAI} className="px-4 py-2 rounded-xl text-sm text-dark-200 hover:text-dark-50 hover:bg-white/[0.04] transition border border-white/[0.06]">
+                  Edit
+                </button>
+                <button onClick={clearOpenAI} className="px-4 py-2 rounded-xl text-sm text-crimson-300 hover:bg-crimson-900/20 transition border border-crimson-800/30">
+                  Remove
+                </button>
+              </>
+            )}
+          </div>
         </label>
       </Section>
 

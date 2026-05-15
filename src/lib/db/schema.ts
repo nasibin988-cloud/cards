@@ -162,6 +162,14 @@ export interface Card {
    * as expired so users aren't stranded after upgrade.
    */
   buriedUntil?: number;
+  /**
+   * Wall-clock ms at which this card was last narrated past in a podcast.
+   * Set by the player once playback crosses the end of a segment that
+   * contains this card. Used by Reviewer to show a small "primed" pip
+   * so the user knows the upcoming card was just heard about.
+   * Cleared on review (the card is no longer "primed", it's now studied).
+   */
+  lastPrimedAt?: number;
   createdAt: number;
   modifiedAt: number;
 }
@@ -407,4 +415,208 @@ export interface ExamQuestion {
   score?: number;
   /** Markdown feedback, AI-generated for free response. */
   feedback?: string;
+}
+
+/* ─── Audio priming (Podcast) ────────────────────────────────── */
+
+/**
+ * Horizon over which a podcast pulls cards. Controls which queue
+ * projection feeds the plan pass.
+ *  - today:    cards FSRS would serve right now (overdue + intake)
+ *  - tomorrow: cards that will be due by end of tomorrow's local day
+ *  - week:     next 7 calendar days
+ *  - new-only: only new (unseen) cards in the deck(s)
+ *  - all:      every non-suspended card in the deck(s)
+ */
+export type PodcastHorizon = 'today' | 'tomorrow' | 'week' | 'new-only' | 'all';
+
+/**
+ * Depth tier picked by the plan pass for each segment. Determined
+ * from words-per-card budget, but user can force one of these as an
+ * override for the whole podcast.
+ *  - flash:    ~10 wpc, theme + name mention only, no mechanism
+ *  - standard: ~50 wpc, mechanism summary, no metaphor
+ *  - deep:     ~150+ wpc, full mechanism + analogy + "why it matters"
+ */
+export type PodcastDepth = 'flash' | 'standard' | 'deep';
+
+/** Where the rendered audio came from. */
+export type PodcastTtsProvider = 'openai' | 'browser';
+
+/**
+ * Two ways the user scopes a podcast.
+ *  - review:  cards FSRS will surface for review. AI picks; user picks decks.
+ *  - preview: cards the user wants to learn fresh. User explicitly scopes.
+ *
+ * Review and preview decompose differently in the UI: review honors the
+ * horizon picker (today/tomorrow/week), preview swaps that for a card-
+ * selection panel (new-only / tag-filter / practice-query). Both walk
+ * through the same projection → plan → script → render pipeline.
+ */
+export type PodcastMode = 'review' | 'preview';
+
+/** Optional audio finishing applied at playback time (not baked into mp3). */
+export type PodcastAudioStyle = 'none' | 'bumpers' | 'bed' | 'both';
+
+/**
+ * One turn in a two-voice conversational segment. `speaker` is symbolic
+ * (the renderer maps A/B → actual voice ids on the parent Podcast).
+ * Timestamps are filled by the renderer so the transcript view can
+ * click-to-seek without word-level timing data from the TTS API.
+ */
+export interface PodcastTurn {
+  speaker: 'A' | 'B';
+  text: string;
+  /** Seconds from the start of this segment's audio. Set after render. */
+  startSec?: number;
+  /** Seconds of audio for this turn. */
+  durationSec?: number;
+}
+
+/** Lifecycle of one podcast. */
+export type PodcastStatus =
+  | 'planning'   // queue projected, sonnet plan pass running
+  | 'scripting'  // opus per-segment scripts in flight
+  | 'rendering'  // tts rendering audio
+  | 'ready'      // all segments rendered, playable
+  | 'error';
+
+/** Lifecycle of one segment within a podcast. */
+export type PodcastSegmentStatus =
+  | 'planned'    // present in plan, not yet written
+  | 'scripted'   // script body authored, no audio yet
+  | 'rendered'   // audio rendered + cached in podcastAudio
+  | 'error';
+
+export interface Podcast {
+  id: string;
+  /** Human-readable name; auto-generated from decks + horizon, user-editable. */
+  name: string;
+  deckIds: string[];
+  horizon: PodcastHorizon;
+  /** Requested target length in seconds. Final may differ slightly. */
+  targetSeconds: number;
+  /** When set, overrides the per-segment depth that words-per-card would choose. */
+  depthOverride?: PodcastDepth;
+  /** Which TTS path rendered audio (or will). */
+  ttsProvider: PodcastTtsProvider;
+  /**
+   * Voice id for speaker A. For OpenAI: alloy/echo/fable/onyx/nova/shimmer.
+   * For browser: a SpeechSynthesisVoice.voiceURI or undefined for the default.
+   */
+  voiceA?: string;
+  /** Voice id for speaker B. Same domain as voiceA but defaults to a contrasting voice. */
+  voiceB?: string;
+  /** Mode selection (review vs preview). Optional for backwards compat. */
+  mode?: PodcastMode;
+  /** Preview-mode filters. */
+  tagFilter?: string[];
+  practiceQueryId?: string;
+  /** Audio finishing applied at playback time. Default 'none'. */
+  audioStyle?: PodcastAudioStyle;
+  status: PodcastStatus;
+  /** Total card count across all segments. Cached for the library tile. */
+  cardCount: number;
+  /** Total characters of script content. Approx-proxy for cost + duration. */
+  totalChars: number;
+  /** Real wall-clock duration in seconds, once rendered. */
+  durationSec?: number;
+  /** Bytes across all stored audio blobs. */
+  totalBytes?: number;
+  /** Set when status === 'error', short message for the UI. */
+  error?: string;
+  createdAt: number;
+  completedAt?: number;
+}
+
+export interface PodcastSegment {
+  id: string;
+  podcastId: string;
+  /** 0-based, defines play order. */
+  index: number;
+  /** Short label shown in the segment list (≤ 6 words). */
+  title: string;
+  /** One-line description: what this segment covers. */
+  description: string;
+  /** Card ids drawn from the projection for this segment, in narration order. */
+  cardIds: string[];
+  /** Depth assigned to THIS segment (after any podcast-level override). */
+  depth: PodcastDepth;
+  /** Target word count budget. */
+  targetWords: number;
+  /**
+   * Authored narrative body. Single-voice text (legacy + fallback for
+   * browser TTS path). When `turns` is set, this is the concatenated
+   * transcript for display + browser playback only — the real audio
+   * is rendered from `turns`.
+   */
+  script: string;
+  /**
+   * Two-voice conversation turns. Populated when the parent podcast was
+   * scripted via the conversation prompt (default for new podcasts).
+   * Each turn carries its own start time + duration once audio is rendered,
+   * which the player uses for transcript click-to-seek.
+   */
+  turns?: PodcastTurn[];
+  /** 1-sentence handoff to the next segment. Empty for final segment. */
+  transition: string;
+  status: PodcastSegmentStatus;
+  /** Set when status === 'error'. */
+  error?: string;
+  /** Duration of this segment's audio in seconds; set once rendered. */
+  durationSec?: number;
+}
+
+/**
+ * Rendered audio blob for one segment. Stored as its own table so the
+ * podcast row stays small + cheap to list, and we can stream segments
+ * to disk without dragging the metadata around.
+ */
+export interface PodcastAudio {
+  /** Compound primary key: `${podcastId}::${segmentIndex}`. */
+  pk: string;
+  podcastId: string;
+  segmentIndex: number;
+  mimeType: string;
+  blob: Blob;
+  bytes: number;
+}
+
+/* ─── Talk mode (Socratic voice loop) ────────────────────────── */
+
+export type TalkRole = 'user' | 'assistant';
+
+export interface TalkTurn {
+  role: TalkRole;
+  text: string;
+  /** ms timestamp at the moment the turn closed (assistant: response done; user: STT returned). */
+  at: number;
+}
+
+/**
+ * One Socratic-conversation session. Persisted so the user can resume
+ * later, scroll the transcript, and review coverage. Audio is NOT
+ * persisted (the recording exists only in the moment) to keep storage
+ * tight; the transcript is the durable artifact.
+ */
+export interface TalkSession {
+  id: string;
+  /** Human-readable label, auto-generated from decks + start time. */
+  name: string;
+  deckIds: string[];
+  /** Restricts the curriculum to cards in this projection horizon. */
+  horizon: PodcastHorizon;
+  startedAt: number;
+  endedAt?: number;
+  turns: TalkTurn[];
+  /**
+   * Per-card coverage score 0..1. Once a card crosses 0.5 it counts as
+   * "introduced" in the UI tally. Computed by fuzzy-matching the
+   * assistant's most recent text against each card's plain content.
+   */
+  coverage: Record<string, number>;
+  /** Voice used for assistant TTS (OpenAI). */
+  voice?: string;
+  /** Optional OpenAI tts model. */
+  ttsModel?: 'tts-1' | 'tts-1-hd';
 }

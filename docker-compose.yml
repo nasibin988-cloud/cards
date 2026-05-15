@@ -18,6 +18,10 @@ services:
       context: .
       args:
         BASE_PATH: /cards
+        # Optional: bake an OpenAI key into the client bundle so users
+        # don't have to paste it into Settings per-device. Read from the
+        # sibling .env file (`OPENAI_API_KEY=sk-…`); blank if absent.
+        OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     image: cards:latest
     container_name: cards
     restart: unless-stopped
