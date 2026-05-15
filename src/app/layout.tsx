@@ -38,6 +38,13 @@ export const metadata: Metadata = {
     statusBarStyle: 'black-translucent',
     title: 'Cards',
   },
+  // Favicon — the Derafsh Kaviani (Sassanid royal standard). Same emblem
+  // the Iran app uses so the tab icon reads as part of the same family.
+  icons: {
+    icon: withBasePath('/icons/derafsh-kaviani.png'),
+    shortcut: withBasePath('/icons/derafsh-kaviani.png'),
+    apple: withBasePath('/icons/derafsh-kaviani.png'),
+  },
   formatDetection: {
     telephone: false,
   },
