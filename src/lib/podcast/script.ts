@@ -30,6 +30,43 @@ const MAX_PARALLEL = 6;
 /** Per-segment timeout. Long deep-tier scripts can run 60s; 120s is safe. */
 const SCRIPT_TIMEOUT_MS = 120_000;
 
+/**
+ * Tool definition that forces the script pass to emit a structurally
+ * valid conversation. Eliminates "non-JSON" parse failures on long
+ * deep-tier scripts where the model used to occasionally trail off in
+ * prose around the JSON. With tool_choice + this schema, the model's
+ * response IS the parsed object.
+ */
+const SCRIPT_TOOL: import('@anthropic-ai/sdk').Anthropic.Tool = {
+  name: 'submit_conversation',
+  description: 'Submit the two-voice conversation script for this segment.',
+  input_schema: {
+    type: 'object',
+    required: ['turns', 'transition'],
+    properties: {
+      turns: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['speaker', 'text'],
+          properties: {
+            speaker: { type: 'string', enum: ['A', 'B'] },
+            text: { type: 'string', description: 'Spoken words, no stage directions, no speaker labels.' },
+          },
+        },
+      },
+      transition: {
+        type: 'object',
+        required: ['speaker', 'text'],
+        properties: {
+          speaker: { type: 'string', enum: ['A', 'B'] },
+          text: { type: 'string', description: 'One sentence handoff to the next segment.' },
+        },
+      },
+    },
+  },
+};
+
 export interface ScriptedSegment {
   index: number;
   title: string;
@@ -81,17 +118,7 @@ TARGET WORD COUNT applies to the sum of all turn texts. Stay within plus or minu
 
 TRANSITION is one sentence (12 to 25 words) spoken by one of the voices, naming or referring to the next segment. If this is the final segment, the transition is one sentence said by either voice that lets the listener exit without ceremony.
 
-Output JSON only, no fence, no prose before or after:
-{
-  "turns": [
-    {"speaker": "A" | "B", "text": "spoken text"},
-    ...
-  ],
-  "transition": {
-    "speaker": "A" | "B",
-    "text": "one sentence handoff"
-  }
-}`;
+Submit the conversation through the submit_conversation tool. The tool's schema is the source of truth for the response shape.`;
 
 interface RawScriptResponse {
   turns?: Array<{ speaker?: string; text?: string }>;
@@ -154,7 +181,7 @@ async function scriptOne(
     lines.push(cardBlock(note));
   });
   lines.push('');
-  lines.push('Write the conversation now. JSON only.');
+  lines.push('Submit the conversation through the submit_conversation tool.');
 
   const { signal: timedSignal, cleanup } = timeoutSignal(signal, SCRIPT_TIMEOUT_MS);
   let response;
@@ -164,6 +191,8 @@ async function scriptOne(
         model: SCRIPT_MODEL,
         max_tokens: 12_000,
         system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        tools: [SCRIPT_TOOL],
+        tool_choice: { type: 'tool', name: SCRIPT_TOOL.name },
         messages: [{ role: 'user', content: lines.join('\n') }],
       },
       { signal: timedSignal },
@@ -172,25 +201,32 @@ async function scriptOne(
     cleanup();
   }
 
-  const text = response.content
-    .map(b => (b.type === 'text' ? b.text : ''))
-    .join('')
-    .trim();
-
-  const json = (() => {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
-    if (fenced) return fenced[1].trim();
-    const start = text.indexOf('{');
-    return start >= 0 ? text.slice(start) : text;
-  })();
-
+  // Pull the submit_conversation tool_use block. With tool_choice
+  // forcing the tool, the API guarantees its `input` already parses
+  // as the schema above — no JSON.parse on raw text needed.
+  const toolBlock = response.content.find(
+    b => b.type === 'tool_use' && b.name === SCRIPT_TOOL.name,
+  );
   let parsed: RawScriptResponse;
-  try {
-    parsed = JSON.parse(json);
-  } catch (err) {
-    throw new Error(
-      `Script pass returned non-JSON for segment "${segment.title}": ${err instanceof Error ? err.message : String(err)}`,
-    );
+  if (toolBlock && toolBlock.type === 'tool_use') {
+    parsed = toolBlock.input as RawScriptResponse;
+  } else {
+    // Defensive fallback for the rare case the API returns prose (e.g.
+    // hit max_tokens before emitting the tool_use). Surface raw text
+    // so failures are debuggable.
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
+    const json = extractJson(text);
+    if (!json) {
+      throw new Error(
+        `Script pass returned no tool_use block for segment "${segment.title}". Raw text: ${text.slice(0, 300)}`,
+      );
+    }
+    try { parsed = JSON.parse(json); }
+    catch (err) {
+      throw new Error(
+        `Script pass fallback JSON parse failed for segment "${segment.title}": ${err instanceof Error ? err.message : String(err)}. Raw: ${json.slice(0, 200)}`,
+      );
+    }
   }
   const turns: PodcastTurn[] = (parsed.turns ?? [])
     .map(t => ({
@@ -294,4 +330,30 @@ export async function scriptSingleSegment(
   const apiKey = await getSetting('claude_api_key');
   if (!apiKey) throw new Error('Claude API key not configured. Add it in Settings.');
   return scriptOne(apiKey, segment, index, total, nextSegmentTitle, podcastTitle, signal);
+}
+
+/** Best-effort JSON extraction used only when tool_use is absent. Same
+ *  brace-walking helper as in plan.ts; kept local so each module stays
+ *  self-contained. */
+function extractJson(text: string): string | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+  if (fenced) return fenced[1].trim();
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }

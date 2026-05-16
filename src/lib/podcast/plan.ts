@@ -70,20 +70,7 @@ Hard rules:
 - Descriptions are exactly one sentence.
 - The intro is one or two sentences. Sets the scene for what's coming. No greeting, no "welcome", no "today we will".
 
-Output JSON only, no fence, no prose before or after:
-{
-  "title": "podcast-wide title",
-  "intro": "1-2 sentences",
-  "segments": [
-    {
-      "title": "string, max 6 words",
-      "description": "one sentence",
-      "cardIndices": [number, ...],
-      "depth": "flash" | "standard" | "deep",
-      "targetWords": number
-    }
-  ]
-}`;
+Submit the plan through the submit_plan tool. The tool's schema is the source of truth for the response shape.`;
 
 interface RawPlanResponse {
   title?: string;
@@ -138,6 +125,44 @@ function parseDepth(v: unknown, fallback: PodcastDepth): PodcastDepth {
   return v === 'flash' || v === 'standard' || v === 'deep' ? v : fallback;
 }
 
+/**
+ * Tool definition forcing the planner to emit a structurally-valid plan
+ * directly via Anthropic's tool_use API. This eliminates the entire
+ * class of "model wrote prose around the JSON" parse failures that
+ * plagued the v1 implementation: the model literally cannot return
+ * anything other than an object matching this schema.
+ */
+const PLAN_TOOL: import('@anthropic-ai/sdk').Anthropic.Tool = {
+  name: 'submit_plan',
+  description: 'Submit the clustered + budgeted segment plan for the podcast.',
+  input_schema: {
+    type: 'object',
+    required: ['title', 'intro', 'segments'],
+    properties: {
+      title: { type: 'string', description: 'Podcast-wide title.' },
+      intro: { type: 'string', description: 'One to two sentence cold-open.' },
+      segments: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['title', 'description', 'cardIndices', 'depth', 'targetWords'],
+          properties: {
+            title: { type: 'string', description: 'At most 6 words.' },
+            description: { type: 'string', description: 'Exactly one sentence.' },
+            cardIndices: {
+              type: 'array',
+              items: { type: 'integer', minimum: 0 },
+              description: 'Indices into the CARDS list provided in the user message.',
+            },
+            depth: { type: 'string', enum: ['flash', 'standard', 'deep'] },
+            targetWords: { type: 'integer', minimum: 1 },
+          },
+        },
+      },
+    },
+  },
+};
+
 export async function planPodcast(
   projection: Projection,
   targetSeconds: number,
@@ -162,6 +187,8 @@ export async function planPodcast(
         model: PLANNER_MODEL,
         max_tokens: 16_000,
         system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        tools: [PLAN_TOOL],
+        tool_choice: { type: 'tool', name: PLAN_TOOL.name },
         messages: [{ role: 'user', content: payload }],
       },
       { signal: timedSignal },
@@ -170,28 +197,60 @@ export async function planPodcast(
     cleanup();
   }
 
-  const text = response.content
-    .map(b => (b.type === 'text' ? b.text : ''))
-    .join('')
-    .trim();
-
-  const json = (() => {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
-    if (fenced) return fenced[1].trim();
-    const start = text.indexOf('{');
-    return start >= 0 ? text.slice(start) : text;
-  })();
-
-  let parsed: RawPlanResponse;
-  try {
-    parsed = JSON.parse(json);
-  } catch (err) {
-    throw new Error(
-      `Plan pass returned non-JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  // Pull the submit_plan tool_use block out of the response. With
+  // tool_choice forcing this tool, the API guarantees exactly one
+  // tool_use block whose `input` already parses as the schema above.
+  const toolBlock = response.content.find(
+    b => b.type === 'tool_use' && b.name === PLAN_TOOL.name,
+  );
+  if (!toolBlock || toolBlock.type !== 'tool_use') {
+    // Fall back to text scraping for the rare case the API returns
+    // plain text despite tool_choice (typically only on stop_reason
+    // 'max_tokens'). Surface the raw text so failures are debuggable.
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
+    const json = extractJson(text);
+    if (!json) {
+      throw new Error(
+        `Plan pass returned no tool_use block and no parseable JSON. Raw text: ${text.slice(0, 400)}`,
+      );
+    }
+    let parsed: RawPlanResponse;
+    try { parsed = JSON.parse(json); }
+    catch (err) {
+      throw new Error(
+        `Plan pass fallback JSON parse failed: ${err instanceof Error ? err.message : String(err)}. Raw: ${json.slice(0, 200)}`,
+      );
+    }
+    return materializePlan(parsed, projection, targetWords, depthOverride);
   }
-
+  const parsed = toolBlock.input as RawPlanResponse;
   return materializePlan(parsed, projection, targetWords, depthOverride);
+}
+
+/** Best-effort JSON extraction used only when tool_use is absent. */
+function extractJson(text: string): string | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+  if (fenced) return fenced[1].trim();
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  // Walk forward keeping track of brace depth so we close on the
+  // matching `}` rather than slicing to end-of-text.
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 /**
