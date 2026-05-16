@@ -136,11 +136,16 @@ export default function TalkSessionView({ session: initialSession }: Props) {
       await updateTalkSession(session.id, { coverage });
       setSession(s => ({ ...s, turns: fullHistory, coverage }));
 
-      // TTS the response and play.
+      // TTS the response and play. Default to gpt-4o-mini-tts with a
+      // Socratic-coach instruction string so the study partner sounds
+      // like a person, not a narrator. Sessions stored before this
+      // upgrade still play correctly through the older model.
       setStatus('speaking');
       const mp3 = await renderTextToMp3(replyText, {
-        voice: (session.voice ?? 'alloy') as never,
-        model: session.ttsModel ?? 'tts-1',
+        voice: (session.voice ?? 'nova') as never,
+        model: session.ttsModel ?? 'gpt-4o-mini-tts',
+        instructions: session.instructions
+          ?? 'Speak as a thoughtful study partner thinking through ideas aloud with the listener. Warm, measured, curious. Natural conversational pace. Not a narrator. Not an interviewer. Slight pauses for emphasis but no announcer cadence.',
         signal: ctrl.signal,
       });
       if (mp3) await playBlob(mp3);

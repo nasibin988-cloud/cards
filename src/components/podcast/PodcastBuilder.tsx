@@ -60,7 +60,7 @@ export default function PodcastBuilder({ onCreated }: { onCreated?: () => void }
   const [provider, setProvider] = useState<PodcastTtsProvider>('openai');
   const [voiceA, setVoiceA] = useState<OpenAIVoice>('alloy');
   const [voiceB, setVoiceB] = useState<OpenAIVoice>('onyx');
-  const [ttsModel, setTtsModel] = useState<OpenAITtsModel>('tts-1');
+  const [ttsModel, setTtsModel] = useState<OpenAITtsModel>('gpt-4o-mini-tts');
   const [audioStyle, setAudioStyle] = useState<PodcastAudioStyle>('none');
   const [tagOptions, setTagOptions] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
@@ -314,6 +314,13 @@ export default function PodcastBuilder({ onCreated }: { onCreated?: () => void }
 
       <Section title="Voices">
         <ChipRow>
+          <Chip
+            active={provider === 'openai' && ttsModel === 'gpt-4o-mini-tts'}
+            onClick={() => { setProvider('openai'); setTtsModel('gpt-4o-mini-tts'); }}
+            title="Newest OpenAI model. Accepts tone instructions, sounds noticeably more conversational than tts-1/hd. Recommended."
+          >
+            OpenAI 4o-mini (best)
+          </Chip>
           <Chip active={provider === 'openai' && ttsModel === 'tts-1'} onClick={() => { setProvider('openai'); setTtsModel('tts-1'); }}>
             OpenAI tts-1
           </Chip>

@@ -72,6 +72,9 @@ export interface BuildInput {
   voiceB?: OpenAIVoice;
   ttsModel?: OpenAITtsModel;
   speed?: number;
+  /** Optional per-voice instruction strings (gpt-4o-mini-tts only). */
+  instructionsA?: string;
+  instructionsB?: string;
   audioStyle?: PodcastAudioStyle;
   signal?: AbortSignal;
 }
@@ -136,6 +139,9 @@ export async function buildPodcast(
       ttsProvider: input.ttsProvider,
       voiceA: input.ttsProvider === 'openai' ? (input.voiceA ?? 'alloy') : undefined,
       voiceB: input.ttsProvider === 'openai' ? (input.voiceB ?? 'onyx') : undefined,
+      ttsModel: input.ttsProvider === 'openai' ? (input.ttsModel ?? 'gpt-4o-mini-tts') : undefined,
+      instructionsA: input.instructionsA,
+      instructionsB: input.instructionsB,
       status: 'planning',
       cardCount: cards.length,
       totalChars: 0,
@@ -456,13 +462,16 @@ async function renderSegmentAudio(
   }
   const voiceA = (podcast.voiceA ?? 'alloy') as OpenAIVoice;
   const voiceB = (podcast.voiceB ?? 'onyx') as OpenAIVoice;
+  const model = (podcast.ttsModel ?? 'gpt-4o-mini-tts') as OpenAITtsModel;
   const result = await renderTurnsToSegment(
     turns.map(t => ({ speaker: t.speaker, text: t.text })),
     {
       voiceA,
       voiceB,
-      model: 'tts-1',
+      model,
       speed: 1.0,
+      instructionsA: podcast.instructionsA,
+      instructionsB: podcast.instructionsB,
       signal,
     },
   );

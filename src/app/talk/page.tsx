@@ -68,7 +68,7 @@ export default function TalkIndex() {
         deckIds: [...selectedDecks],
         horizon,
         voice,
-        ttsModel: 'tts-1',
+        ttsModel: 'gpt-4o-mini-tts',
       });
       router.push(`/talk/${sessionId}`);
     } catch (err) {

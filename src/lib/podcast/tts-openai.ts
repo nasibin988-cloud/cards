@@ -28,15 +28,36 @@ const OPENAI_TTS_INPUT_MAX = 4096;
 const CHUNK_TARGET = 3800;
 
 export type OpenAIVoice = 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
-export type OpenAITtsModel = 'tts-1' | 'tts-1-hd';
+/**
+ * tts-1   — fastest, cheapest, audiobook-narrator quality
+ * tts-1-hd — slower, ~2× cost, slightly cleaner highs
+ * gpt-4o-mini-tts — newest, accepts an `instructions` field that
+ *   steers tone/pace/emotion. Sounds dramatically more conversational
+ *   than tts-1/hd at similar cost. Default for new podcasts.
+ */
+export type OpenAITtsModel = 'tts-1' | 'tts-1-hd' | 'gpt-4o-mini-tts';
 
 export interface RenderOptions {
   voice?: OpenAIVoice;
   model?: OpenAITtsModel;
-  /** 0.25 to 4.0; 1.0 is normal pace. */
+  /** 0.25 to 4.0; 1.0 is normal pace. tts-1/hd only — gpt-4o-mini-tts
+   *  takes pacing through `instructions` instead and ignores this. */
   speed?: number;
+  /** Tone/style steering string. Only honored by gpt-4o-mini-tts. */
+  instructions?: string;
   signal?: AbortSignal;
 }
+
+/**
+ * Default instruction strings the conversational two-voice path uses.
+ * Voice A is the curious thinker; Voice B is the methodical one. These
+ * are tuned for the Socratic dialogue shape the script prompt enforces.
+ */
+export const DEFAULT_INSTRUCTIONS_A =
+  "Speak as a curious, engaged thinker working through an idea aloud, in a real conversation with one other person. Light pace with natural hesitations and small shifts in intonation when arriving at an insight. Slightly warm. Not a narrator. No announcer cadence. Trail off mid-sentence when invited to. Don't sound rehearsed.";
+
+export const DEFAULT_INSTRUCTIONS_B =
+  "Speak as a thoughtful, methodical thinker in a real conversation with one other person. Measured pace, clear articulation, calm. Slightly lower energy than the other speaker. Occasional soft pauses for emphasis. Conversational, not lecturing. Don't sound rehearsed.";
 
 /**
  * Split text into TTS-sized chunks on sentence boundaries. Falls back
@@ -94,19 +115,29 @@ async function renderChunk(
 ): Promise<ArrayBuffer> {
   const { signal, cleanup } = timeoutSignal(opts.signal, TTS_CHUNK_TIMEOUT_MS);
   try {
+    const model = opts.model ?? 'gpt-4o-mini-tts';
+    // Endpoint shape is identical across all three TTS models. The only
+    // model-conditional fields are `speed` (tts-1/hd only) and
+    // `instructions` (gpt-4o-mini-tts only). Omit fields the model
+    // doesn't honor to avoid the API rejecting the request.
+    const body: Record<string, unknown> = {
+      model,
+      voice: opts.voice ?? 'alloy',
+      input: text,
+      response_format: 'mp3',
+    };
+    if (model === 'gpt-4o-mini-tts') {
+      if (opts.instructions) body.instructions = opts.instructions;
+    } else {
+      body.speed = opts.speed ?? 1.0;
+    }
     const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: opts.model ?? 'tts-1',
-        voice: opts.voice ?? 'alloy',
-        input: text,
-        response_format: 'mp3',
-        speed: opts.speed ?? 1.0,
-      }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok) {
@@ -181,13 +212,20 @@ export async function renderTextToMp3(
 }
 
 /**
- * Estimate the cost of rendering a string at current tts-1 pricing
- * ($15 per 1M chars for tts-1, $30 per 1M chars for tts-1-hd).
- * Returns USD as a fractional number.
+ * Estimate the cost of rendering a string in USD.
+ * Pricing:
+ *   tts-1            $15 per 1M chars
+ *   tts-1-hd         $30 per 1M chars
+ *   gpt-4o-mini-tts  ~$12 per 1M output-audio chars (priced by output
+ *                    tokens, but per-character cost lands close enough
+ *                    for the builder's ballpark estimate)
  */
-export function estimateCostUsd(text: string, model: OpenAITtsModel = 'tts-1'): number {
+export function estimateCostUsd(text: string, model: OpenAITtsModel = 'gpt-4o-mini-tts'): number {
   const chars = text.length;
-  const per1M = model === 'tts-1' ? 15 : 30;
+  const per1M =
+    model === 'tts-1' ? 15
+    : model === 'tts-1-hd' ? 30
+    : 12;
   return (chars / 1_000_000) * per1M;
 }
 
@@ -218,6 +256,10 @@ export interface MultiVoiceRenderOptions {
   voiceB: OpenAIVoice;
   model?: OpenAITtsModel;
   speed?: number;
+  /** Per-voice instruction strings; only honored by gpt-4o-mini-tts.
+   *  When omitted, the defaults exported above are used. */
+  instructionsA?: string;
+  instructionsB?: string;
   /** Max simultaneous TTS calls. Defaults to 4. */
   maxParallel?: number;
   signal?: AbortSignal;
@@ -252,6 +294,10 @@ export async function renderTurnsToSegment(
   // Render each turn to a Blob (multi-chunk safe internally).
   const buffersPerTurn: (ArrayBuffer[] | null)[] = new Array(turns.length).fill(null);
 
+  const model = opts.model ?? 'gpt-4o-mini-tts';
+  const instructionsA = opts.instructionsA ?? DEFAULT_INSTRUCTIONS_A;
+  const instructionsB = opts.instructionsB ?? DEFAULT_INSTRUCTIONS_B;
+
   await runParallel(turns.length, maxParallel, async (i) => {
     const turn = turns[i];
     if (!turn.text.trim()) {
@@ -259,13 +305,15 @@ export async function renderTurnsToSegment(
       return;
     }
     const voice = turn.speaker === 'A' ? opts.voiceA : opts.voiceB;
+    const instructions = turn.speaker === 'A' ? instructionsA : instructionsB;
     const chunks = chunkForTts(turn.text);
     const out: ArrayBuffer[] = [];
     for (const chunk of chunks) {
       out.push(await renderChunk(apiKey, chunk, {
         voice,
-        model: opts.model,
+        model,
         speed: opts.speed,
+        instructions,
         signal: opts.signal,
       }));
     }

@@ -507,6 +507,14 @@ export interface Podcast {
   voiceA?: string;
   /** Voice id for speaker B. Same domain as voiceA but defaults to a contrasting voice. */
   voiceB?: string;
+  /** OpenAI TTS model name baked at build time. Defaults to gpt-4o-mini-tts
+   *  for new podcasts. Older rows without this field render as tts-1. */
+  ttsModel?: 'tts-1' | 'tts-1-hd' | 'gpt-4o-mini-tts';
+  /** Per-voice tone/style instructions (gpt-4o-mini-tts only). Stored on
+   *  the row so a Resume/Retry uses the same voice direction as the
+   *  original render. */
+  instructionsA?: string;
+  instructionsB?: string;
   /** Mode selection (review vs preview). Optional for backwards compat. */
   mode?: PodcastMode;
   /** Preview-mode filters. */
@@ -618,5 +626,8 @@ export interface TalkSession {
   /** Voice used for assistant TTS (OpenAI). */
   voice?: string;
   /** Optional OpenAI tts model. */
-  ttsModel?: 'tts-1' | 'tts-1-hd';
+  ttsModel?: 'tts-1' | 'tts-1-hd' | 'gpt-4o-mini-tts';
+  /** Tone/style steering for gpt-4o-mini-tts. Defaults to a warm,
+   *  thinking-aloud Socratic register baked into the TTS layer. */
+  instructions?: string;
 }
